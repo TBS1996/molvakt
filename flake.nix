@@ -51,6 +51,9 @@
             echo "ᚱ Language bot dev shell"
             echo "Rust: $(rustc --version)"
             echo "DB:   $DATABASE_URL"
+            if [ -z "$OPENAI_API_KEY" ]; then
+              echo "LLM:  set OPENAI_API_KEY to use OpenAI (optional: OPENAI_MODEL, default gpt-4o-mini)"
+            fi
           '';
         };
       }
