@@ -1,6 +1,7 @@
 Language learning bot
 
 This is an application for learning languages through whatsapp using an intermediary bot between you and a real life person.
+molvakt from norwegian word målvakt, which typically means goalkeeper but can also mean language guard.
 
 
 # prototype example flow
