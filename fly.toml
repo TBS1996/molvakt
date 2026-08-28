@@ -1,0 +1,39 @@
+# fly.toml app configuration file generated for molvakt on 2026-08-28T08:20:49+02:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'molvakt'
+primary_region = 'arn'
+
+[build]
+
+[env]
+  DATABASE_URL = "sqlite:///data/languagebot.db"
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ['app']
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    path = "/health"
+    timeout = "5s"
+
+# SQLite needs a single machine with a persistent volume.
+[mounts]
+  source = "molvakt_data"
+  destination = "/data"
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 1024

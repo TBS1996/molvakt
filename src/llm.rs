@@ -8,7 +8,8 @@ use async_openai::Client;
 
 use serde::Deserialize;
 
-use crate::HistoryEntry;
+use crate::db::Conversation;
+use crate::history::HistoryEntry;
 
 pub struct Llm {
     client: Client<OpenAIConfig>,
@@ -24,24 +25,28 @@ pub struct JudgmentResponse {
 }
 
 impl Llm {
-    pub fn from_env() -> Result<Self> {
+    pub fn from_env(conversation: &Conversation) -> Result<Self> {
         let api_key =
             std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY must be set")?;
         let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into());
-        let target_language =
-            std::env::var("MOLVAKT_TARGET_LANGUAGE").unwrap_or_else(|_| "Norwegian".into());
-        let source_language =
-            std::env::var("MOLVAKT_SOURCE_LANGUAGE").unwrap_or_else(|_| "English".into());
 
         Ok(Self {
             client: Client::with_config(OpenAIConfig::new().with_api_key(api_key)),
             model,
-            target_language,
-            source_language,
+            target_language: conversation.target_language.clone(),
+            source_language: conversation.source_language.clone(),
         })
     }
 
-    pub async fn validate_alice_message(&self, message: &str) -> Result<JudgmentResponse> {
+    pub fn source_language(&self) -> &str {
+        &self.source_language
+    }
+
+    pub fn target_language(&self) -> &str {
+        &self.target_language
+    }
+
+    pub async fn validate_teacher_message(&self, message: &str) -> Result<JudgmentResponse> {
         let system = format!(
             "You check whether a message is written in {target}. \
              Reject if it is primarily in another language (e.g. {source}). \
@@ -215,8 +220,8 @@ pub fn format_history(history: &[HistoryEntry]) -> String {
     history
         .iter()
         .map(|entry| match entry {
-            HistoryEntry::Alice(message) => format!("Alice: {message}"),
-            HistoryEntry::Bob(message) => format!("Bob: {message}"),
+            HistoryEntry::Teacher(message) => format!("Teacher: {message}"),
+            HistoryEntry::Learner(message) => format!("Learner: {message}"),
         })
         .collect::<Vec<_>>()
         .join("\n")

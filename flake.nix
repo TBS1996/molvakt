@@ -38,13 +38,16 @@
 
             # Expose localhost to Meta during development
             cloudflared
+
+            # Deploy
+            flyctl
           ];
 
           env = {
             RUST_BACKTRACE = "1";
 
             # sqlx-cli will use this by default
-            DATABASE_URL = "sqlite://languagebot.db";
+            DATABASE_URL = "sqlite:languagebot.db";
           };
 
           shellHook = ''
@@ -54,6 +57,7 @@
             if [ -z "$OPENAI_API_KEY" ]; then
               echo "LLM:  set OPENAI_API_KEY to use OpenAI (optional: OPENAI_MODEL, default gpt-4o-mini)"
             fi
+            echo "Lang: set MOLVAKT_TARGET_LANGUAGE / MOLVAKT_SOURCE_LANGUAGE (defaults: Norwegian / English)"
           '';
         };
       }
