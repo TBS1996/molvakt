@@ -57,7 +57,7 @@ impl Llm {
              as long as the meaning is clear. \
              Reject ONLY if the message is primarily in another language (e.g. {source}) \
              or is not real text in any language. A few loanwords are fine. \
-             When in doubt, accept. \
+             When in doubt, accept. All feedback and explanations must be written in English\
              Respond with JSON only: \
              {{\"accepted\": true/false, \"feedback\": \"brief explanation if rejected\"}}",
             target = self.target_language,
