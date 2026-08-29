@@ -20,7 +20,13 @@ impl Bot {
     }
 
     pub async fn handle_webhook(&self, body: &str) -> anyhow::Result<()> {
-        for (phone, text) in WhatsApp::parse_text_messages(body)? {
+        let messages = WhatsApp::parse_text_messages(body)?;
+        if messages.is_empty() {
+            println!("whatsapp webhook: no text messages in payload");
+            return Ok(());
+        }
+        for (phone, text) in messages {
+            println!("whatsapp webhook: message from {phone}: {text:?}");
             if let Err(error) = self.handle_message(&phone, &text).await {
                 eprintln!("error handling message from {phone}: {error:?}");
                 let _ = self

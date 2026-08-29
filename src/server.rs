@@ -84,6 +84,7 @@ async fn whatsapp_verify(Query(query): Query<WhatsAppVerifyQuery>) -> impl IntoR
 }
 
 async fn whatsapp_receive(State(state): State<AppState>, body: String) -> impl IntoResponse {
+    println!("whatsapp webhook: received {} bytes", body.len());
     let bot = state.bot.clone();
     tokio::spawn(async move {
         if let Err(error) = bot.handle_webhook(&body).await {
