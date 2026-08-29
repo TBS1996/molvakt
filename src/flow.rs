@@ -95,7 +95,7 @@ pub fn review_choice_body() -> &'static str {
 
 pub fn review_choice_list_rows() -> [(&'static str, &'static str, &'static str); 3] {
     [
-        ("1", "I understand completely", "Ready to reply"),
+        ("1", "I understand", "Ready to reply"),
         ("2", "I don't understand", "Explain it to me"),
         ("3", "I might understand", "Quiz me first"),
     ]
