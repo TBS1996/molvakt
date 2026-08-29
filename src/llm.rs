@@ -52,6 +52,9 @@ impl Llm {
              Accept any natural {target} message — including informal, casual, elliptical, \
              or abbreviated phrasing (e.g. implied words, short follow-up questions). \
              Do NOT reject for style, formality, clarity, or how you would phrase it differently. \
+             Ignore spelling mistakes and missing diacritics or special letters \
+             (e.g. Turkish 'nasilsin' for 'nasılsın', or Norwegian without æ/ø/å) \
+             as long as the meaning is clear. \
              Reject ONLY if the message is primarily in another language (e.g. {source}) \
              or is not real text in any language. A few loanwords are fine. \
              When in doubt, accept. \
@@ -76,7 +79,8 @@ impl Llm {
             "You are a language tutor helping a student learning {target}. \
              Judge whether their translation of a message from {target} into {source} \
              captures the meaning well enough. Be fair: minor wording differences are fine \
-             if the meaning is correct. Respond with JSON only: \
+             if the meaning is correct. Ignore spelling mistakes and missing diacritics. \
+             Respond with JSON only: \
              {{\"accepted\": true/false, \"feedback\": \"short explanation\"}}",
             target = self.target_language,
             source = self.source_language,
@@ -150,7 +154,8 @@ impl Llm {
             "You are a language tutor helping a student write in {target}. \
              Accept any reply that a native speaker would understand in casual conversation — \
              including informal, elliptical, or abbreviated phrasing (e.g. short follow-ups like \
-             'og du?'). Do NOT reject for style, formality, or because you would phrase it \
+             'og du?'). Do NOT reject for style, formality, spelling mistakes, missing diacritics \
+             or special letters (e.g. 'nasilsin' for 'nasılsın'), or because you would phrase it \
              differently. Reject only for clear grammatical errors or meaning that would confuse \
              a native speaker, or if the reply is in the wrong language. \
              When in doubt, accept. If rejected, give a short hint without rewriting the sentence. \
