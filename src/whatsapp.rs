@@ -90,39 +90,42 @@ impl WhatsApp {
     }
 
     pub async fn send_review_choice_list(
-        &self,
-        to: &str,
-        body: &str,
-        button_label: &str,
-        rows: &[(&str, &str, &str)],
-    ) -> anyhow::Result<()> {
-        let list_rows: Vec<_> = rows
-            .iter()
-            .map(|(id, title, description)| {
-                serde_json::json!({
+    &self,
+    to: &str,
+    body: &str,
+    _button_label: &str,
+    rows: &[(&str, &str, &str)],
+) -> anyhow::Result<()> {
+    let buttons: Vec<_> = rows
+        .iter()
+        .map(|(id, title, _description)| {
+            serde_json::json!({
+                "type": "reply",
+                "reply": {
                     "id": id,
                     "title": title,
-                    "description": description,
-                })
+                }
             })
-            .collect();
+        })
+        .collect();
 
-        self.send_interactive(to, serde_json::json!({
-    "type": "interactive",
-    "interactive": {
-        "type": "list",
-        "body": { "text": body },
-        "action": {
-            "button": button_label,
-            "sections": [{
-                "title": "Understanding",
-                "rows": list_rows,
-            }],
-        },
-    }
-}))
-.await
-    }
+    self.send_interactive(
+        to,
+        serde_json::json!({
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {
+                    "text": body
+                },
+                "action": {
+                    "buttons": buttons
+                }
+            }
+        }),
+    )
+    .await
+}
 
     pub async fn send_text(&self, to: &str, body: &str) -> anyhow::Result<()> {
         self.send_interactive(
