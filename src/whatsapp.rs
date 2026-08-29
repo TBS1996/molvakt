@@ -108,17 +108,20 @@ impl WhatsApp {
             .collect();
 
         self.send_interactive(to, serde_json::json!({
-            "type": "list",
-            "body": { "text": body },
-            "action": {
-                "button": button_label,
-                "sections": [{
-                    "title": "Understanding",
-                    "rows": list_rows,
-                }],
-            },
-        }))
-        .await
+    "type": "interactive",
+    "interactive": {
+        "type": "list",
+        "body": { "text": body },
+        "action": {
+            "button": button_label,
+            "sections": [{
+                "title": "Understanding",
+                "rows": list_rows,
+            }],
+        },
+    }
+}))
+.await
     }
 
     pub async fn send_text(&self, to: &str, body: &str) -> anyhow::Result<()> {
