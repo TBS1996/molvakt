@@ -236,7 +236,7 @@ fn teaching_format(target: &str, source: &str) -> String {
          Translation — natural {source} equivalent.\n\
          Meaning — one or two sentences on what the message is saying.\n\
          Grammar — explain sentence structure, word order, verb forms, articles, cases, \
-         or other patterns a beginner should learn from this message.\n\
+         or other patterns a beginner should learn from this message. always explain in english\n\
          Words — break down each word or short phrase: dictionary meaning plus its role \
          in this sentence.\n\
          How to reply — useful patterns or phrases for answering a message like this \
