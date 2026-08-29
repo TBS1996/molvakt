@@ -100,13 +100,12 @@ impl Llm {
 
     pub async fn teach_message(&self, original: &str, history: &[HistoryEntry]) -> Result<String> {
         let system = format!(
-            "You are a language tutor teaching {target} to a {source} speaker. \
-             Explain the message clearly and concisely. Include:\n\
-             1. A natural translation into {source}\n\
-             2. Brief grammar notes for the sentence structure\n\
-             3. Key words with meaning in isolation and in this sentence's context",
+            "You are a patient language tutor teaching {target} to a {source} speaker. \
+             The student did not understand this message and needs a clear lesson. \
+             {format}",
             target = self.target_language,
             source = self.source_language,
+            format = teaching_format(&self.target_language, &self.source_language),
         );
 
         let user = format!(
@@ -126,12 +125,14 @@ impl Llm {
         history: &[HistoryEntry],
     ) -> Result<String> {
         let system = format!(
-            "You are a language tutor teaching {target} to a {source} speaker. \
+            "You are a patient language tutor teaching {target} to a {source} speaker. \
              The student tried to translate a message but got it wrong. \
-             Give the full explanation (translation, grammar, word breakdown) and \
-             specific tips based on what they got wrong in their attempt.",
+             Give a full lesson using the format below, and add a short note on what was \
+             off in their attempt and what to look for next time. \
+             {format}",
             target = self.target_language,
             source = self.source_language,
+            format = teaching_format(&self.target_language, &self.source_language),
         );
 
         let user = format!(
@@ -158,10 +159,15 @@ impl Llm {
              or special letters (e.g. 'nasilsin' for 'nasılsın'), or because you would phrase it \
              differently. Reject only for clear grammatical errors or meaning that would confuse \
              a native speaker, or if the reply is in the wrong language. \
-             When in doubt, accept. If rejected, give a short hint without rewriting the sentence. \
+             If they wrote in {source} instead of {target}, reject but help them: briefly \
+             explain what they were trying to say, teach the grammar they need, and give \
+             useful words or patterns for answering in {target} — without writing the full \
+             reply for them. For other rejections, give a short hint without rewriting \
+             the sentence. When in doubt, accept. \
              Respond with JSON only: \
-             {{\"accepted\": true/false, \"feedback\": \"hints or brief praise\"}}",
+             {{\"accepted\": true/false, \"feedback\": \"hints, mini-lesson, or brief praise\"}}",
             target = self.target_language,
+            source = self.source_language,
         );
 
         let user = format!(
@@ -222,6 +228,21 @@ impl Llm {
 
         serde_json::from_str(&content).context("failed to parse model JSON response")
     }
+}
+
+fn teaching_format(target: &str, source: &str) -> String {
+    format!(
+        "Structure your answer for WhatsApp (plain text, short labeled sections):\n\
+         Translation — natural {source} equivalent.\n\
+         Meaning — one or two sentences on what the message is saying.\n\
+         Grammar — explain sentence structure, word order, verb forms, articles, cases, \
+         or other patterns a beginner should learn from this message.\n\
+         Words — break down each word or short phrase: dictionary meaning plus its role \
+         in this sentence.\n\
+         How to reply — useful patterns or phrases for answering a message like this \
+         in {target}; show building blocks, not a full scripted answer.\n\
+         Be thorough and beginner-friendly. Prefer teaching over brevity."
+    )
 }
 
 pub fn format_history(history: &[HistoryEntry]) -> String {

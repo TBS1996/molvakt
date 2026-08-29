@@ -20,9 +20,9 @@ impl Bot {
     }
 
     pub async fn handle_webhook(&self, body: &str) -> anyhow::Result<()> {
-        let messages = WhatsApp::parse_text_messages(body)?;
+        let messages = WhatsApp::parse_incoming_messages(body)?;
         if messages.is_empty() {
-            println!("whatsapp webhook: no text messages in payload");
+            println!("whatsapp webhook: no handled messages in payload");
             return Ok(());
         }
         for (phone, text) in messages {
@@ -163,14 +163,15 @@ impl Bot {
             .insert_message(conversation.id, MessageRole::Teacher, text)
             .await?;
 
-        let (new_session, learner_messages) = flow::begin_review(text.to_string());
+        let (new_session, teacher_message) = flow::begin_review(text.to_string());
         self.db
             .save_learner_session(learner.id, &new_session)
             .await?;
 
-        for message in learner_messages {
-            self.whatsapp.send_text(&learner.phone, &message).await?;
-        }
+        self.whatsapp
+            .send_text(&learner.phone, &teacher_message)
+            .await?;
+        self.send_review_choices(&learner.phone).await?;
 
         self.whatsapp
             .send_text(&teacher.phone, "Message sent to the learner.")
@@ -196,6 +197,10 @@ impl Bot {
             self.whatsapp.send_text(&learner.phone, &message).await?;
         }
 
+        if turn.show_review_choices {
+            self.send_review_choices(&learner.phone).await?;
+        }
+
         if let Some(learner_reply) = turn.completed_reply {
             self.db
                 .insert_message(conversation.id, MessageRole::Learner, &learner_reply)
@@ -213,5 +218,16 @@ impl Bot {
         }
 
         Ok(())
+    }
+
+    async fn send_review_choices(&self, phone: &str) -> anyhow::Result<()> {
+        self.whatsapp
+            .send_review_choice_list(
+                phone,
+                flow::review_choice_body(),
+                flow::REVIEW_CHOICE_LIST_BUTTON,
+                &flow::review_choice_list_rows(),
+            )
+            .await
     }
 }

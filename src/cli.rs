@@ -38,11 +38,10 @@ pub async fn run() -> anyhow::Result<()> {
                 }
                 db.insert_message(conversation.id, MessageRole::Teacher, &message)
                     .await?;
-                let (new_session, prompts) = flow::begin_review(message);
+                let (new_session, teacher_message) = flow::begin_review(message);
                 session = new_session;
-                for prompt in prompts {
-                    println!("\n{prompt}");
-                }
+                println!("\n{teacher_message}");
+                println!("\n{}", flow::review_choice_prompt());
             }
             LearnerSession::Reviewing(_) | LearnerSession::Replying(_) => {
                 let input = read_line("> ");

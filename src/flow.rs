@@ -58,6 +58,7 @@ pub struct LearnerTurn {
     pub learner_messages: Vec<String>,
     pub teacher_message: Option<String>,
     pub completed_reply: Option<String>,
+    pub show_review_choices: bool,
 }
 
 impl ReviewState {
@@ -80,21 +81,38 @@ impl ReplyState {
     }
 }
 
-pub fn begin_review(teacher_message: String) -> (LearnerSession, Vec<String>) {
+pub fn begin_review(teacher_message: String) -> (LearnerSession, String) {
     let session = LearnerSession::Reviewing(ReviewState::new(teacher_message.clone()));
-    let messages = vec![
-        format!("New message from your teacher:\n\"{teacher_message}\""),
-        review_choice_prompt(),
-    ];
-    (session, messages)
+    let message = format!("New message from your teacher:\n\"{teacher_message}\"");
+    (session, message)
+}
+
+pub const REVIEW_CHOICE_LIST_BUTTON: &str = "Choose";
+
+pub fn review_choice_body() -> &'static str {
+    "How well did you understand this message?"
+}
+
+pub fn review_choice_list_rows() -> [(&'static str, &'static str, &'static str); 3] {
+    [
+        ("1", "I understand completely", "Ready to reply"),
+        ("2", "I don't understand", "Explain it to me"),
+        ("3", "I might understand", "Quiz me first"),
+    ]
 }
 
 pub fn review_choice_prompt() -> String {
-    "How well did you understand this message?\n\
-     1 — I understand completely\n\
-     2 — I don't understand\n\
-     3 — I might understand"
-        .to_string()
+    let rows = review_choice_list_rows();
+    format!(
+        "{}\n\
+         1 — {}\n\
+         2 — {}\n\
+         3 — {}",
+        review_choice_body(),
+        rows[0].1,
+        rows[1].1,
+        rows[2].1,
+    )
 }
 
 pub async fn handle_learner_message(
@@ -107,6 +125,7 @@ pub async fn handle_learner_message(
         learner_messages: Vec::new(),
         teacher_message: None,
         completed_reply: None,
+        show_review_choices: false,
     };
 
     let input = input.trim();
@@ -149,10 +168,9 @@ pub async fn handle_learner_message(
                         break;
                     }
                     _ => {
-                        turn.learner_messages.push(format!(
-                            "Invalid choice. Pick 1, 2, or 3.\n\n{}",
-                            review_choice_prompt()
-                        ));
+                        turn.learner_messages
+                            .push("Please choose from the menu.".into());
+                        turn.show_review_choices = true;
                         break;
                     }
                 },

@@ -34,6 +34,22 @@ pub struct IncomingMessage {
     #[serde(rename = "type")]
     pub message_type: String,
     pub text: Option<TextBody>,
+    pub interactive: Option<InteractiveBody>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InteractiveBody {
+    #[serde(rename = "type")]
+    pub interactive_type: String,
+    pub button_reply: Option<InteractiveReply>,
+    pub list_reply: Option<InteractiveReply>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InteractiveReply {
+    pub id: String,
+    #[allow(dead_code)]
+    pub title: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -56,17 +72,15 @@ impl WhatsApp {
         })
     }
 
-    pub fn parse_text_messages(body: &str) -> anyhow::Result<Vec<(String, String)>> {
+    pub fn parse_incoming_messages(body: &str) -> anyhow::Result<Vec<(String, String)>> {
         let payload: WebhookPayload = serde_json::from_str(body).context("invalid webhook json")?;
         let mut messages = Vec::new();
 
         for entry in payload.entry.unwrap_or_default() {
             for change in entry.changes.unwrap_or_default() {
                 for message in change.value.and_then(|v| v.messages).unwrap_or_default() {
-                    if message.message_type == "text" {
-                        if let Some(text) = message.text {
-                            messages.push((message.from, text.body));
-                        }
+                    if let Some(text) = message_body(&message) {
+                        messages.push((message.from, text));
                     }
                 }
             }
@@ -75,22 +89,69 @@ impl WhatsApp {
         Ok(messages)
     }
 
+    pub async fn send_review_choice_list(
+        &self,
+        to: &str,
+        body: &str,
+        button_label: &str,
+        rows: &[(&str, &str, &str)],
+    ) -> anyhow::Result<()> {
+        let list_rows: Vec<_> = rows
+            .iter()
+            .map(|(id, title, description)| {
+                serde_json::json!({
+                    "id": id,
+                    "title": title,
+                    "description": description,
+                })
+            })
+            .collect();
+
+        self.send_interactive(to, serde_json::json!({
+            "type": "list",
+            "body": { "text": body },
+            "action": {
+                "button": button_label,
+                "sections": [{
+                    "title": "Understanding",
+                    "rows": list_rows,
+                }],
+            },
+        }))
+        .await
+    }
+
     pub async fn send_text(&self, to: &str, body: &str) -> anyhow::Result<()> {
+        self.send_interactive(
+            to,
+            serde_json::json!({
+                "type": "text",
+                "text": { "body": body },
+            }),
+        )
+        .await
+    }
+
+    async fn send_interactive(&self, to: &str, content: serde_json::Value) -> anyhow::Result<()> {
         let url = format!(
             "https://graph.facebook.com/v21.0/{}/messages",
             self.phone_number_id
         );
 
+        let mut payload = serde_json::json!({
+            "messaging_product": "whatsapp",
+            "to": to,
+        });
+        payload
+            .as_object_mut()
+            .context("invalid message payload")?
+            .extend(content.as_object().cloned().context("invalid message content")?);
+
         let response = self
             .http
             .post(&url)
             .bearer_auth(&self.token)
-            .json(&serde_json::json!({
-                "messaging_product": "whatsapp",
-                "to": to,
-                "type": "text",
-                "text": { "body": body },
-            }))
+            .json(&payload)
             .send()
             .await
             .context("failed to send whatsapp message")?;
@@ -102,5 +163,20 @@ impl WhatsApp {
         }
 
         Ok(())
+    }
+}
+
+fn message_body(message: &IncomingMessage) -> Option<String> {
+    match message.message_type.as_str() {
+        "text" => message.text.as_ref().map(|text| text.body.clone()),
+        "interactive" => {
+            let interactive = message.interactive.as_ref()?;
+            match interactive.interactive_type.as_str() {
+                "button_reply" => interactive.button_reply.as_ref().map(|reply| reply.id.clone()),
+                "list_reply" => interactive.list_reply.as_ref().map(|reply| reply.id.clone()),
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
