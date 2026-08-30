@@ -1,8 +1,8 @@
 use anyhow::Context;
 
 use crate::conversations::{
-    handle_help, handle_list, handle_switch, is_help_command, is_list_command, is_new_conversation_command,
-    parse_switch_selection,
+    handle_cancel, handle_help, handle_list, handle_switch, is_help_command, is_list_command,
+    is_new_conversation_command, parse_cancel_selection, parse_switch_selection,
 };
 use crate::db::{Conversation, Db, MessageRole, Participant, ParticipantResolve, ParticipantRole};
 use crate::flow::{self, LearnerSession};
@@ -73,6 +73,10 @@ impl Bot {
 
         if let Some(selection) = parse_switch_selection(text) {
             return handle_switch(&self.db, &self.whatsapp, phone, selection).await;
+        }
+
+        if let Some(selection) = parse_cancel_selection(text) {
+            return handle_cancel(&self.db, &self.whatsapp, phone, selection).await;
         }
 
         if let Some(role) = is_new_conversation_command(text) {

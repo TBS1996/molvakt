@@ -1,6 +1,8 @@
 use anyhow::Context;
 use serde::Deserialize;
 
+use crate::phone::normalize_phone;
+
 #[derive(Clone)]
 pub struct WhatsApp {
     http: reqwest::Client,
@@ -96,6 +98,7 @@ impl WhatsApp {
     _button_label: &str,
     rows: &[(&str, &str, &str)],
 ) -> anyhow::Result<()> {
+    let to = normalize_phone(to);
     let buttons: Vec<_> = rows
         .iter()
         .map(|(id, title, _description)| {
@@ -110,7 +113,7 @@ impl WhatsApp {
         .collect();
 
     self.send_interactive(
-        to,
+        &to,
         serde_json::json!({
             "type": "interactive",
             "interactive": {
@@ -128,8 +131,9 @@ impl WhatsApp {
 }
 
     pub async fn send_text(&self, to: &str, body: &str) -> anyhow::Result<()> {
+        let to = normalize_phone(to);
         self.send_interactive(
-            to,
+            &to,
             serde_json::json!({
                 "type": "text",
                 "text": { "body": body },

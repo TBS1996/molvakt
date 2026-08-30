@@ -2,7 +2,7 @@ use crate::db::{
     ConversationInvite, Db, OnboardingData, OnboardingStep, ParticipantRole,
 };
 use anyhow::Context;
-use crate::phone::{display_phone, normalize_phone};
+use crate::phone::{display_phone, looks_like_phone, normalize_phone, phones_match};
 use crate::whatsapp::WhatsApp;
 
 pub async fn start_new_conversation(
@@ -175,6 +175,16 @@ async fn continue_onboarding(
                     .await?;
                 return Ok(());
             }
+            if looks_like_phone(target_language) {
+                whatsapp
+                    .send_text(
+                        phone,
+                        "That looks like a phone number, not a language.\n\
+                         Send the language name, e.g. Norwegian.",
+                    )
+                    .await?;
+                return Ok(());
+            }
 
             data.target_language = Some(target_language.to_string());
             if data.source_language.is_none() {
@@ -223,6 +233,25 @@ async fn send_invite(
                 ),
             )
             .await?;
+        return Ok(());
+    }
+
+    if let Some(invite) = db
+        .find_pending_invite_between(phone, partner_phone)
+        .await?
+    {
+        let message = if phones_match(&invite.inviter_phone, phone) {
+            format!(
+                "You already have a pending invite with {}. Waiting for them to accept.",
+                display_phone(partner_phone)
+            )
+        } else {
+            format!(
+                "{} already invited you! Reply ACCEPT or DECLINE to their invite first.",
+                display_phone(partner_phone)
+            )
+        };
+        whatsapp.send_text(phone, &message).await?;
         return Ok(());
     }
 

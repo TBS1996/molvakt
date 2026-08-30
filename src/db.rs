@@ -391,6 +391,32 @@ impl Db {
         Ok(listings)
     }
 
+    pub async fn find_pending_invite_between(
+        &self,
+        phone_a: &str,
+        phone_b: &str,
+    ) -> anyhow::Result<Option<ConversationInvite>> {
+        let phone_a = normalize_phone(phone_a);
+        let phone_b = normalize_phone(phone_b);
+        let row = sqlx::query(
+            "SELECT id, conversation_id, inviter_phone, invitee_phone, inviter_role, status
+             FROM conversation_invites
+             WHERE status = 'pending'
+               AND ((inviter_phone = ? AND invitee_phone = ?)
+                 OR (inviter_phone = ? AND invitee_phone = ?))
+             ORDER BY id DESC
+             LIMIT 1",
+        )
+        .bind(&phone_a)
+        .bind(&phone_b)
+        .bind(&phone_b)
+        .bind(&phone_a)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(invite_from_row))
+    }
+
     pub async fn find_complete_conversation_between(
         &self,
         phone_a: &str,
