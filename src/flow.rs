@@ -81,10 +81,10 @@ impl ReplyState {
     }
 }
 
-pub fn begin_review(teacher_message: String) -> (LearnerSession, String) {
+pub fn begin_review(teacher_message: String, sender_label: &str) -> (LearnerSession, String) {
     let session = LearnerSession::Reviewing(ReviewState::new(teacher_message.clone()));
     let message = format!(
-        "New message from your teacher:\n\"{teacher_message}\"\n\n\
+        "New message from {sender_label}:\n\"{teacher_message}\"\n\n\
          Reply when you're ready, or use the buttons below if you need help."
     );
     (session, message)
@@ -121,6 +121,7 @@ pub async fn handle_learner_message(
     input: &str,
     history: &[HistoryEntry],
     llm: &Llm,
+    partner_label: &str,
 ) -> anyhow::Result<LearnerTurn> {
     let mut turn = LearnerTurn {
         learner_messages: Vec::new(),
@@ -228,7 +229,7 @@ pub async fn handle_learner_message(
                 });
 
                 if judgment.accepted {
-                    let summary = build_teacher_summary(reply, input);
+                    let summary = build_teacher_summary(reply, input, partner_label);
                     turn.completed_reply = Some(input.to_string());
                     turn.teacher_message = Some(summary);
                     *session = LearnerSession::Idle;
@@ -243,37 +244,40 @@ pub async fn handle_learner_message(
     Ok(turn)
 }
 
-pub fn build_teacher_summary(reply: &ReplyState, learner_message: &str) -> String {
+pub fn build_teacher_summary(
+    reply: &ReplyState,
+    learner_message: &str,
+    learner_label: &str,
+) -> String {
     let understanding = match reply.understanding {
         UnderstandingSummary::UnderstoodCompletely => {
-            "The learner understood your message completely.".to_string()
+            "They understood your message completely.".to_string()
         }
         UnderstandingSummary::DidNotUnderstand => {
-            "The learner didn't understand your message and was given a full explanation."
-                .to_string()
+            "They didn't understand your message and were given a full explanation.".to_string()
         }
         UnderstandingSummary::TranslatedCorrectly {
             translation_attempts,
         } => {
             if translation_attempts == 1 {
-                "The learner guessed the meaning of your message and got it right on first try."
+                "They guessed the meaning of your message and got it right on first try."
                     .to_string()
             } else {
                 format!(
-                    "The learner guessed the meaning of your message correctly after {translation_attempts} attempts."
+                    "They guessed the meaning of your message correctly after {translation_attempts} attempts."
                 )
             }
         }
         UnderstandingSummary::TranslatedIncorrectly {
             translation_attempts,
         } => format!(
-            "The learner tried to translate your message {translation_attempts} time(s) before being taught the meaning."
+            "They tried to translate your message {translation_attempts} time(s) before being taught the meaning."
         ),
     };
 
     let reply_attempts = reply.attempts.len();
 
     format!(
-        "Reply from learner: {learner_message}\n\n{understanding}\nThe learner needed {reply_attempts} iteration(s) to craft this message."
+        "Reply from {learner_label}: {learner_message}\n\n{understanding}\nThey needed {reply_attempts} iteration(s) to craft this message."
     )
 }

@@ -219,6 +219,13 @@ async fn send_invite(
         .clone()
         .unwrap_or_else(default_source_language);
 
+    if phones_match(phone, partner_phone) {
+        whatsapp
+            .send_text(phone, "You can't pair with your own number. Send your partner's phone.")
+            .await?;
+        return Ok(());
+    }
+
     if db
         .find_complete_conversation_between(phone, partner_phone)
         .await?

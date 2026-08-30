@@ -15,6 +15,10 @@ pub fn looks_like_phone(text: &str) -> bool {
     digits.len() >= 8 && digits.len() * 2 >= trimmed.len()
 }
 
+pub fn partner_label(phone: &str, language: &str) -> String {
+    format!("{} ({language})", display_phone(phone))
+}
+
 pub fn display_phone(phone: &str) -> String {
     let digits = normalize_phone(phone);
     if digits.is_empty() {

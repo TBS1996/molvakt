@@ -44,7 +44,8 @@ pub async fn run() -> anyhow::Result<()> {
                 }
                 db.insert_message(conversation.id, MessageRole::Teacher, &message)
                     .await?;
-                let (new_session, teacher_message) = flow::begin_review(message);
+                let (new_session, teacher_message) =
+                    flow::begin_review(message, "teacher (CLI)");
                 session = new_session;
                 println!("\n{teacher_message}");
                 println!("\n{}", flow::review_choice_prompt());
@@ -52,9 +53,14 @@ pub async fn run() -> anyhow::Result<()> {
             LearnerSession::Reviewing(_) | LearnerSession::Replying(_) => {
                 let input = read_line("> ");
                 let current_history = db.load_history(conversation.id).await?;
-                let turn =
-                    flow::handle_learner_message(&mut session, &input, &current_history, &llm)
-                        .await?;
+                let turn = flow::handle_learner_message(
+                    &mut session,
+                    &input,
+                    &current_history,
+                    &llm,
+                    "learner (CLI)",
+                )
+                .await?;
 
                 for message in turn.learner_messages {
                     println!("\n{message}");

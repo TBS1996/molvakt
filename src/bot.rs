@@ -1,14 +1,15 @@
 use anyhow::Context;
 
 use crate::conversations::{
-    handle_cancel, handle_help, handle_list, handle_switch, is_help_command, is_list_command,
-    is_new_conversation_command, parse_cancel_selection, parse_switch_selection,
+    handle_cancel, handle_help, handle_list, handle_set_language, handle_switch, is_help_command,
+    is_list_command, is_new_conversation_command, parse_cancel_selection, parse_set_language,
+    parse_switch_selection,
 };
 use crate::db::{Conversation, Db, MessageRole, Participant, ParticipantResolve, ParticipantRole};
 use crate::flow::{self, LearnerSession};
 use crate::llm::Llm;
 use crate::onboarding;
-use crate::phone::display_phone;
+use crate::phone::{display_phone, partner_label};
 use crate::whatsapp::WhatsApp;
 
 #[derive(Clone)]
@@ -77,6 +78,10 @@ impl Bot {
 
         if let Some(selection) = parse_cancel_selection(text) {
             return handle_cancel(&self.db, &self.whatsapp, phone, selection).await;
+        }
+
+        if let Some(command) = parse_set_language(text) {
+            return handle_set_language(&self.db, &self.whatsapp, phone, command).await;
         }
 
         if let Some(role) = is_new_conversation_command(text) {
@@ -172,7 +177,10 @@ impl Bot {
             .insert_message(conversation.id, MessageRole::Teacher, text)
             .await?;
 
-        let (new_session, teacher_message) = flow::begin_review(text.to_string());
+        let (new_session, teacher_message) = flow::begin_review(
+            text.to_string(),
+            &partner_label(&teacher.phone, &conversation.target_language),
+        );
         self.db
             .save_learner_session(learner.id, &new_session)
             .await?;
@@ -202,7 +210,10 @@ impl Bot {
         let history = self.db.load_history(conversation.id).await?;
         let mut session = self.db.load_learner_session(learner.id).await?;
 
-        let turn = flow::handle_learner_message(&mut session, text, &history, &llm).await?;
+        let learner_label = partner_label(&learner.phone, &conversation.target_language);
+        let turn =
+            flow::handle_learner_message(&mut session, text, &history, &llm, &learner_label)
+                .await?;
         self.db.save_learner_session(learner.id, &session).await?;
 
         for message in turn.learner_messages {

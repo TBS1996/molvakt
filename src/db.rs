@@ -391,6 +391,29 @@ impl Db {
         Ok(listings)
     }
 
+    pub async fn update_target_language(
+        &self,
+        conversation_id: i64,
+        phone: &str,
+        target_language: &str,
+    ) -> anyhow::Result<()> {
+        let phone = normalize_phone(phone);
+        if self
+            .find_participant_in_conversation(&phone, conversation_id)
+            .await?
+            .is_none()
+        {
+            anyhow::bail!("not a participant in this conversation");
+        }
+
+        sqlx::query("UPDATE conversations SET target_language = ? WHERE id = ?")
+            .bind(target_language)
+            .bind(conversation_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn find_pending_invite_between(
         &self,
         phone_a: &str,
