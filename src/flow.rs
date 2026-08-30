@@ -83,19 +83,21 @@ impl ReplyState {
 
 pub fn begin_review(teacher_message: String) -> (LearnerSession, String) {
     let session = LearnerSession::Reviewing(ReviewState::new(teacher_message.clone()));
-    let message = format!("New message from your teacher:\n\"{teacher_message}\"");
+    let message = format!(
+        "New message from your teacher:\n\"{teacher_message}\"\n\n\
+         Reply when you're ready, or use the buttons below if you need help."
+    );
     (session, message)
 }
 
-pub const REVIEW_CHOICE_LIST_BUTTON: &str = "Choose";
+pub const REVIEW_CHOICE_LIST_BUTTON: &str = "Need help?";
 
 pub fn review_choice_body() -> &'static str {
-    "How well did you understand this message?"
+    "Not sure about the message?"
 }
 
-pub fn review_choice_list_rows() -> [(&'static str, &'static str, &'static str); 3] {
+pub fn review_choice_list_rows() -> [(&'static str, &'static str, &'static str); 2] {
     [
-        ("1", "I understand", "Ready to reply"),
         ("2", "I don't understand", "Explain it to me"),
         ("3", "I might understand", "Quiz me first"),
     ]
@@ -105,13 +107,12 @@ pub fn review_choice_prompt() -> String {
     let rows = review_choice_list_rows();
     format!(
         "{}\n\
-         1 — {}\n\
+         Reply directly when you're ready, or:\n\
          2 — {}\n\
          3 — {}",
         review_choice_body(),
         rows[0].1,
         rows[1].1,
-        rows[2].1,
     )
 }
 
@@ -144,17 +145,6 @@ pub async fn handle_learner_message(
             }
             LearnerSession::Reviewing(review) => match review.phase {
                 ReviewPhase::Choosing => match input {
-                    "1" => {
-                        *session = LearnerSession::Replying(ReplyState::new(
-                            review.message.clone(),
-                            UnderstandingSummary::UnderstoodCompletely,
-                        ));
-                        turn.learner_messages.push(format!(
-                            "Write your reply in {}:",
-                            llm.target_language()
-                        ));
-                        break;
-                    }
                     "2" => {
                         review.phase = ReviewPhase::Teaching;
                         continue;
@@ -168,10 +158,11 @@ pub async fn handle_learner_message(
                         break;
                     }
                     _ => {
-                        turn.learner_messages
-                            .push("Please choose from the menu.".into());
-                        turn.show_review_choices = true;
-                        break;
+                        *session = LearnerSession::Replying(ReplyState::new(
+                            review.message.clone(),
+                            UnderstandingSummary::UnderstoodCompletely,
+                        ));
+                        continue;
                     }
                 },
                 ReviewPhase::Teaching => {
