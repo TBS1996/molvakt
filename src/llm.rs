@@ -21,6 +21,7 @@ pub struct Llm {
 #[derive(Deserialize)]
 pub struct JudgmentResponse {
     pub accepted: bool,
+    #[serde(default)]
     pub feedback: String,
 }
 

@@ -19,7 +19,6 @@ pub struct AppState {
 
 pub async fn run() -> anyhow::Result<()> {
     let db = Db::connect().await?;
-    db.get_or_create_default_conversation().await?;
     let bot = Bot::new(db.clone()).await?;
     let state = AppState { db, bot };
 
@@ -36,24 +35,8 @@ pub async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn health(State(state): State<AppState>) -> impl IntoResponse {
-    match state.db.get_or_create_default_conversation().await {
-        Ok(conversation) => (
-            StatusCode::OK,
-            Json(json!({
-                "status": "ok",
-                "target_language": conversation.target_language,
-                "source_language": conversation.source_language,
-            })),
-        ),
-        Err(error) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({
-                "status": "error",
-                "message": error.to_string(),
-            })),
-        ),
-    }
+async fn health() -> impl IntoResponse {
+    (StatusCode::OK, Json(json!({ "status": "ok" })))
 }
 
 #[derive(Debug, Deserialize)]

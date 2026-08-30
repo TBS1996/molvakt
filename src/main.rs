@@ -4,6 +4,8 @@ mod db;
 mod flow;
 mod history;
 mod llm;
+mod onboarding;
+mod phone;
 mod server;
 mod whatsapp;
 

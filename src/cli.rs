@@ -10,7 +10,13 @@ pub async fn run() -> anyhow::Result<()> {
     println!("molvakt — language learning bot (CLI prototype)\n");
 
     let db = Db::connect().await?;
-    let conversation = db.get_or_create_default_conversation().await?;
+    let target_language = std::env::var("MOLVAKT_TARGET_LANGUAGE")
+        .unwrap_or_else(|_| "Norwegian".into());
+    let source_language = std::env::var("MOLVAKT_SOURCE_LANGUAGE")
+        .unwrap_or_else(|_| "English".into());
+    let conversation = db
+        .create_conversation(&target_language, &source_language)
+        .await?;
     let llm = Llm::from_env(&conversation).context("failed to initialize OpenAI client")?;
     let history = db.load_history(conversation.id).await?;
 

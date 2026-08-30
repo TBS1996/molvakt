@@ -3,6 +3,8 @@ use anyhow::Context;
 use crate::db::{Conversation, Db, MessageRole, Participant, ParticipantRole};
 use crate::flow::{self, LearnerSession};
 use crate::llm::Llm;
+use crate::onboarding;
+use crate::phone::display_phone;
 use crate::whatsapp::WhatsApp;
 
 #[derive(Clone)]
@@ -42,12 +44,56 @@ impl Bot {
     }
 
     async fn handle_message(&self, phone: &str, text: &str) -> anyhow::Result<()> {
-        let conversation = self.db.get_or_create_default_conversation().await?;
+        if let Some(invite) = self.db.find_pending_invite_for_phone(phone).await? {
+            return onboarding::handle_invite_response(&self.db, &self.whatsapp, phone, text, invite)
+                .await;
+        }
 
-        let participant = match self.db.find_participant_by_phone(phone).await? {
+        let participant = match self.db.find_participant_for_phone(phone).await? {
             Some(participant) => participant,
-            None => return self.handle_registration(phone, text, conversation.id).await,
+            None => {
+                return onboarding::handle_new_or_onboarding_user(
+                    &self.db,
+                    &self.whatsapp,
+                    phone,
+                    text,
+                )
+                .await;
+            }
         };
+
+        let conversation = self.db.get_conversation(participant.conversation_id).await?;
+
+        if !self
+            .db
+            .conversation_has_both_participants(conversation.id)
+            .await?
+        {
+            if let Some(invite) = self
+                .db
+                .find_pending_invite_for_conversation(conversation.id)
+                .await?
+            {
+                self.whatsapp
+                    .send_text(
+                        phone,
+                        &format!(
+                            "Still waiting for {} to accept your invite.",
+                            display_phone(&invite.invitee_phone)
+                        ),
+                    )
+                    .await?;
+            } else {
+                self.db.delete_conversation(conversation.id).await?;
+                self.whatsapp
+                    .send_text(
+                        phone,
+                        "This conversation is no longer active. Reply LEARNER or TEACHER to start over.",
+                    )
+                    .await?;
+            }
+            return Ok(());
+        }
 
         match participant.role {
             ParticipantRole::Teacher => {
@@ -59,71 +105,6 @@ impl Bot {
                     .await
             }
         }
-    }
-
-    async fn handle_registration(
-        &self,
-        phone: &str,
-        text: &str,
-        conversation_id: i64,
-    ) -> anyhow::Result<()> {
-        match text.trim().to_ascii_uppercase().as_str() {
-            "TEACHER" => {
-                if self.db.find_participant_by_role(conversation_id, ParticipantRole::Teacher).await?.is_some() {
-                    self.whatsapp
-                        .send_text(phone, "A teacher is already registered for this conversation.")
-                        .await?;
-                    return Ok(());
-                }
-                self.db
-                    .register_participant(conversation_id, phone, ParticipantRole::Teacher)
-                    .await?;
-                let conversation = self.db.get_conversation(conversation_id).await?;
-                self.whatsapp
-                    .send_text(
-                        phone,
-                        &format!(
-                            "You're registered as the teacher. Send messages in {} and molvakt will forward them to the learner.",
-                            conversation.target_language
-                        ),
-                    )
-                    .await?;
-            }
-            "LEARNER" => {
-                if self.db.find_participant_by_role(conversation_id, ParticipantRole::Learner).await?.is_some() {
-                    self.whatsapp
-                        .send_text(phone, "A learner is already registered for this conversation.")
-                        .await?;
-                    return Ok(());
-                }
-                let participant = self
-                    .db
-                    .register_participant(conversation_id, phone, ParticipantRole::Learner)
-                    .await?;
-                self.db.init_learner_session(participant.id).await?;
-                let conversation = self.db.get_conversation(conversation_id).await?;
-                self.whatsapp
-                    .send_text(
-                        phone,
-                        &format!(
-                            "You're registered as the learner. You'll practice {} here — reply to prompts as they come.",
-                            conversation.target_language
-                        ),
-                    )
-                    .await?;
-            }
-            _ => {
-                self.whatsapp
-                    .send_text(
-                        phone,
-                        "Welcome to molvakt!\n\n\
-                         Reply TEACHER if you're the native speaker.\n\
-                         Reply LEARNER if you're practicing the language.",
-                    )
-                    .await?;
-            }
-        }
-        Ok(())
     }
 
     async fn handle_teacher_message(
@@ -138,7 +119,7 @@ impl Bot {
             .await?
             .context("no learner registered yet")?;
 
-        let mut session = self.db.load_learner_session(learner.id).await?;
+        let session = self.db.load_learner_session(learner.id).await?;
         if session != LearnerSession::Idle {
             self.whatsapp
                 .send_text(

@@ -1,4 +1,5 @@
 use anyhow::Context;
+use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
 use sqlx::Row;
 use std::path::PathBuf;
@@ -6,6 +7,7 @@ use std::str::FromStr;
 
 use crate::flow::LearnerSession;
 use crate::history::HistoryEntry;
+use crate::phone::normalize_phone;
 
 #[derive(Clone)]
 pub struct Db {
@@ -25,7 +27,23 @@ pub struct Participant {
     pub role: ParticipantRole,
 }
 
+pub struct ConversationInvite {
+    pub id: i64,
+    pub conversation_id: i64,
+    pub inviter_phone: String,
+    pub invitee_phone: String,
+    pub inviter_role: ParticipantRole,
+    pub status: InviteStatus,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InviteStatus {
+    Pending,
+    Accepted,
+    Declined,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParticipantRole {
     Teacher,
     Learner,
@@ -37,19 +55,60 @@ pub enum MessageRole {
     Learner,
 }
 
-impl ParticipantRole {
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OnboardingData {
+    pub role: Option<ParticipantRole>,
+    pub partner_phone: Option<String>,
+    pub target_language: Option<String>,
+    pub source_language: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OnboardingStep {
+    Welcome,
+    EnterPartnerPhone,
+    EnterTargetLanguage,
+}
+
+impl OnboardingStep {
     fn as_str(self) -> &'static str {
+        match self {
+            Self::Welcome => "welcome",
+            Self::EnterPartnerPhone => "enter_partner_phone",
+            Self::EnterTargetLanguage => "enter_target_language",
+        }
+    }
+
+    fn from_str(step: &str) -> anyhow::Result<Self> {
+        match step {
+            "welcome" => Ok(Self::Welcome),
+            "enter_partner_phone" => Ok(Self::EnterPartnerPhone),
+            "enter_target_language" => Ok(Self::EnterTargetLanguage),
+            other => anyhow::bail!("unknown onboarding step: {other}"),
+        }
+    }
+}
+
+impl ParticipantRole {
+    pub fn as_str(self) -> &'static str {
         match self {
             ParticipantRole::Teacher => "teacher",
             ParticipantRole::Learner => "learner",
         }
     }
 
-    fn from_str(role: &str) -> anyhow::Result<Self> {
+    pub fn from_str(role: &str) -> anyhow::Result<Self> {
         match role {
             "teacher" => Ok(ParticipantRole::Teacher),
             "learner" => Ok(ParticipantRole::Learner),
             other => anyhow::bail!("unknown participant role: {other}"),
+        }
+    }
+
+    pub fn opposite(self) -> Self {
+        match self {
+            ParticipantRole::Teacher => ParticipantRole::Learner,
+            ParticipantRole::Learner => ParticipantRole::Teacher,
         }
     }
 }
@@ -71,6 +130,25 @@ impl MessageRole {
     }
 }
 
+impl InviteStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            InviteStatus::Pending => "pending",
+            InviteStatus::Accepted => "accepted",
+            InviteStatus::Declined => "declined",
+        }
+    }
+
+    fn from_str(status: &str) -> anyhow::Result<Self> {
+        match status {
+            "pending" => Ok(InviteStatus::Pending),
+            "accepted" => Ok(InviteStatus::Accepted),
+            "declined" => Ok(InviteStatus::Declined),
+            other => anyhow::bail!("unknown invite status: {other}"),
+        }
+    }
+}
+
 impl Db {
     pub async fn connect() -> anyhow::Result<Self> {
         let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:languagebot.db".into());
@@ -88,43 +166,24 @@ impl Db {
         Ok(Self { pool })
     }
 
-    pub async fn get_or_create_default_conversation(&self) -> anyhow::Result<Conversation> {
-        if let Some(conversation) = self.load_conversation_by_id_optional().await? {
-            return Ok(conversation);
-        }
-
-        let target_language = std::env::var("MOLVAKT_TARGET_LANGUAGE")
-            .unwrap_or_else(|_| "Norwegian".into());
-        let source_language = std::env::var("MOLVAKT_SOURCE_LANGUAGE")
-            .unwrap_or_else(|_| "English".into());
-
+    pub async fn create_conversation(
+        &self,
+        target_language: &str,
+        source_language: &str,
+    ) -> anyhow::Result<Conversation> {
         let result = sqlx::query(
             "INSERT INTO conversations (target_language, source_language) VALUES (?, ?)",
         )
-        .bind(&target_language)
-        .bind(&source_language)
+        .bind(target_language)
+        .bind(source_language)
         .execute(&self.pool)
         .await?;
 
         Ok(Conversation {
             id: result.last_insert_rowid(),
-            target_language,
-            source_language,
+            target_language: target_language.to_string(),
+            source_language: source_language.to_string(),
         })
-    }
-
-    async fn load_conversation_by_id_optional(&self) -> anyhow::Result<Option<Conversation>> {
-        let row = sqlx::query(
-            "SELECT id, target_language, source_language FROM conversations ORDER BY id LIMIT 1",
-        )
-        .fetch_optional(&self.pool)
-        .await?;
-
-        Ok(row.map(|row| Conversation {
-            id: row.get("id"),
-            target_language: row.get("target_language"),
-            source_language: row.get("source_language"),
-        }))
     }
 
     pub async fn load_history(&self, conversation_id: i64) -> anyhow::Result<Vec<HistoryEntry>> {
@@ -179,23 +238,29 @@ impl Db {
         })
     }
 
-    pub async fn find_participant_by_phone(
+    pub async fn find_participant_for_phone(
         &self,
         phone: &str,
     ) -> anyhow::Result<Option<Participant>> {
-        let row = sqlx::query(
-            "SELECT id, conversation_id, phone, role FROM participants WHERE phone = ?",
-        )
-        .bind(phone)
-        .fetch_optional(&self.pool)
-        .await?;
+        let phone = normalize_phone(phone);
 
-        Ok(row.map(|row| Participant {
-            id: row.get("id"),
-            conversation_id: row.get("conversation_id"),
-            phone: row.get("phone"),
-            role: ParticipantRole::from_str(row.get::<String, _>("role").as_str()).unwrap(),
-        }))
+        if let Some(active_id) = self.get_active_conversation_id(&phone).await? {
+            if let Some(participant) = self
+                .find_participant_in_conversation(&phone, active_id)
+                .await?
+            {
+                return Ok(Some(participant));
+            }
+        }
+
+        let participants = self.find_all_participants_by_phone(&phone).await?;
+        match participants.len() {
+            0 => Ok(None),
+            1 => Ok(Some(participants.into_iter().next().unwrap())),
+            _ => anyhow::bail!(
+                "you are in multiple conversations — conversation switching is not supported yet"
+            ),
+        }
     }
 
     pub async fn find_participant_by_role(
@@ -211,12 +276,20 @@ impl Db {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.map(|row| Participant {
-            id: row.get("id"),
-            conversation_id: row.get("conversation_id"),
-            phone: row.get("phone"),
-            role: ParticipantRole::from_str(row.get::<String, _>("role").as_str()).unwrap(),
-        }))
+        Ok(row.map(participant_from_row))
+    }
+
+    pub async fn conversation_has_both_participants(
+        &self,
+        conversation_id: i64,
+    ) -> anyhow::Result<bool> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM participants WHERE conversation_id = ?",
+        )
+        .bind(conversation_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count >= 2)
     }
 
     pub async fn register_participant(
@@ -225,21 +298,233 @@ impl Db {
         phone: &str,
         role: ParticipantRole,
     ) -> anyhow::Result<Participant> {
+        let phone = normalize_phone(phone);
         let result = sqlx::query(
             "INSERT INTO participants (conversation_id, phone, role) VALUES (?, ?, ?)",
         )
         .bind(conversation_id)
-        .bind(phone)
+        .bind(&phone)
         .bind(role.as_str())
         .execute(&self.pool)
         .await?;
 
+        self.set_active_conversation(&phone, conversation_id).await?;
+
         Ok(Participant {
             id: result.last_insert_rowid(),
             conversation_id,
-            phone: phone.to_string(),
+            phone,
             role,
         })
+    }
+
+    pub async fn set_active_conversation(
+        &self,
+        phone: &str,
+        conversation_id: i64,
+    ) -> anyhow::Result<()> {
+        let phone = normalize_phone(phone);
+        sqlx::query(
+            "INSERT INTO user_settings (phone, active_conversation_id, updated_at)
+             VALUES (?, ?, datetime('now'))
+             ON CONFLICT(phone) DO UPDATE SET
+               active_conversation_id = excluded.active_conversation_id,
+               updated_at = excluded.updated_at",
+        )
+        .bind(phone)
+        .bind(conversation_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn create_invite(
+        &self,
+        conversation_id: i64,
+        inviter_phone: &str,
+        invitee_phone: &str,
+        inviter_role: ParticipantRole,
+    ) -> anyhow::Result<ConversationInvite> {
+        let inviter_phone = normalize_phone(inviter_phone);
+        let invitee_phone = normalize_phone(invitee_phone);
+        let result = sqlx::query(
+            "INSERT INTO conversation_invites
+             (conversation_id, inviter_phone, invitee_phone, inviter_role, status)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(conversation_id)
+        .bind(&inviter_phone)
+        .bind(&invitee_phone)
+        .bind(inviter_role.as_str())
+        .bind(InviteStatus::Pending.as_str())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(ConversationInvite {
+            id: result.last_insert_rowid(),
+            conversation_id,
+            inviter_phone,
+            invitee_phone,
+            inviter_role,
+            status: InviteStatus::Pending,
+        })
+    }
+
+    pub async fn find_pending_invite_for_phone(
+        &self,
+        phone: &str,
+    ) -> anyhow::Result<Option<ConversationInvite>> {
+        let phone = normalize_phone(phone);
+        let row = sqlx::query(
+            "SELECT id, conversation_id, inviter_phone, invitee_phone, inviter_role, status
+             FROM conversation_invites
+             WHERE invitee_phone = ? AND status = 'pending'
+             ORDER BY id DESC
+             LIMIT 1",
+        )
+        .bind(phone)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(invite_from_row))
+    }
+
+    pub async fn find_pending_invite_for_conversation(
+        &self,
+        conversation_id: i64,
+    ) -> anyhow::Result<Option<ConversationInvite>> {
+        let row = sqlx::query(
+            "SELECT id, conversation_id, inviter_phone, invitee_phone, inviter_role, status
+             FROM conversation_invites
+             WHERE conversation_id = ? AND status = 'pending'
+             ORDER BY id DESC
+             LIMIT 1",
+        )
+        .bind(conversation_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(invite_from_row))
+    }
+
+    pub async fn update_invite_status(
+        &self,
+        invite_id: i64,
+        status: InviteStatus,
+    ) -> anyhow::Result<()> {
+        sqlx::query("UPDATE conversation_invites SET status = ? WHERE id = ?")
+            .bind(status.as_str())
+            .bind(invite_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_invite(&self, invite_id: i64) -> anyhow::Result<ConversationInvite> {
+        let row = sqlx::query(
+            "SELECT id, conversation_id, inviter_phone, invitee_phone, inviter_role, status
+             FROM conversation_invites WHERE id = ?",
+        )
+        .bind(invite_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(invite_from_row(row))
+    }
+
+    pub async fn save_onboarding_session(
+        &self,
+        phone: &str,
+        step: OnboardingStep,
+        data: &OnboardingData,
+    ) -> anyhow::Result<()> {
+        let phone = normalize_phone(phone);
+        let data_json = serde_json::to_string(data)?;
+        sqlx::query(
+            "INSERT INTO onboarding_sessions (phone, step, data_json, updated_at)
+             VALUES (?, ?, ?, datetime('now'))
+             ON CONFLICT(phone) DO UPDATE SET
+               step = excluded.step,
+               data_json = excluded.data_json,
+               updated_at = excluded.updated_at",
+        )
+        .bind(phone)
+        .bind(step.as_str())
+        .bind(data_json)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn load_onboarding_session(
+        &self,
+        phone: &str,
+    ) -> anyhow::Result<Option<(OnboardingStep, OnboardingData)>> {
+        let phone = normalize_phone(phone);
+        let row = sqlx::query(
+            "SELECT step, data_json FROM onboarding_sessions WHERE phone = ?",
+        )
+        .bind(phone)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let step = OnboardingStep::from_str(row.get::<String, _>("step").as_str())?;
+        let data: OnboardingData = serde_json::from_str(row.get("data_json"))?;
+        Ok(Some((step, data)))
+    }
+
+    pub async fn delete_conversation(&self, conversation_id: i64) -> anyhow::Result<()> {
+        let participant_ids: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM participants WHERE conversation_id = ?",
+        )
+        .bind(conversation_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        for participant_id in participant_ids {
+            sqlx::query("DELETE FROM learner_sessions WHERE participant_id = ?")
+                .bind(participant_id)
+                .execute(&self.pool)
+                .await?;
+        }
+
+        sqlx::query("DELETE FROM participants WHERE conversation_id = ?")
+            .bind(conversation_id)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM conversation_invites WHERE conversation_id = ?")
+            .bind(conversation_id)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM messages WHERE conversation_id = ?")
+            .bind(conversation_id)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(
+            "UPDATE user_settings SET active_conversation_id = NULL
+             WHERE active_conversation_id = ?",
+        )
+        .bind(conversation_id)
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("DELETE FROM conversations WHERE id = ?")
+            .bind(conversation_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn clear_onboarding_session(&self, phone: &str) -> anyhow::Result<()> {
+        let phone = normalize_phone(phone);
+        sqlx::query("DELETE FROM onboarding_sessions WHERE phone = ?")
+            .bind(phone)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn init_learner_session(&self, participant_id: i64) -> anyhow::Result<()> {
@@ -291,6 +576,69 @@ impl Db {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    async fn get_active_conversation_id(&self, phone: &str) -> anyhow::Result<Option<i64>> {
+        let row = sqlx::query(
+            "SELECT active_conversation_id FROM user_settings WHERE phone = ?",
+        )
+        .bind(phone)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.and_then(|row| row.get::<Option<i64>, _>("active_conversation_id")))
+    }
+
+    async fn find_participant_in_conversation(
+        &self,
+        phone: &str,
+        conversation_id: i64,
+    ) -> anyhow::Result<Option<Participant>> {
+        let row = sqlx::query(
+            "SELECT id, conversation_id, phone, role
+             FROM participants WHERE phone = ? AND conversation_id = ?",
+        )
+        .bind(phone)
+        .bind(conversation_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(participant_from_row))
+    }
+
+    async fn find_all_participants_by_phone(
+        &self,
+        phone: &str,
+    ) -> anyhow::Result<Vec<Participant>> {
+        let rows = sqlx::query(
+            "SELECT id, conversation_id, phone, role FROM participants WHERE phone = ?",
+        )
+        .bind(phone)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(participant_from_row).collect())
+    }
+}
+
+fn participant_from_row(row: sqlx::sqlite::SqliteRow) -> Participant {
+    Participant {
+        id: row.get("id"),
+        conversation_id: row.get("conversation_id"),
+        phone: row.get("phone"),
+        role: ParticipantRole::from_str(row.get::<String, _>("role").as_str()).unwrap(),
+    }
+}
+
+fn invite_from_row(row: sqlx::sqlite::SqliteRow) -> ConversationInvite {
+    ConversationInvite {
+        id: row.get("id"),
+        conversation_id: row.get("conversation_id"),
+        inviter_phone: row.get("inviter_phone"),
+        invitee_phone: row.get("invitee_phone"),
+        inviter_role: ParticipantRole::from_str(row.get::<String, _>("inviter_role").as_str())
+            .unwrap(),
+        status: InviteStatus::from_str(row.get::<String, _>("status").as_str()).unwrap(),
     }
 }
 
