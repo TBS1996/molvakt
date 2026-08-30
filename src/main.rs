@@ -1,5 +1,6 @@
 mod bot;
 mod cli;
+mod conversations;
 mod db;
 mod flow;
 mod history;

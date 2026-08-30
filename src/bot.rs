@@ -1,6 +1,10 @@
 use anyhow::Context;
 
-use crate::db::{Conversation, Db, MessageRole, Participant, ParticipantRole};
+use crate::conversations::{
+    handle_help, handle_list, handle_switch, is_help_command, is_list_command, is_new_conversation_command,
+    parse_switch_selection,
+};
+use crate::db::{Conversation, Db, MessageRole, Participant, ParticipantResolve, ParticipantRole};
 use crate::flow::{self, LearnerSession};
 use crate::llm::Llm;
 use crate::onboarding;
@@ -49,31 +53,47 @@ impl Bot {
                 .await;
         }
 
-        let participant = match self.db.find_participant_for_phone(phone).await? {
-            Some(participant) => participant,
-            None => {
-                return onboarding::handle_new_or_onboarding_user(
-                    &self.db,
-                    &self.whatsapp,
-                    phone,
-                    text,
-                )
-                .await;
+        if self.db.load_onboarding_session(phone).await?.is_some() {
+            return onboarding::handle_new_or_onboarding_user(
+                &self.db,
+                &self.whatsapp,
+                phone,
+                text,
+            )
+            .await;
+        }
+
+        if is_list_command(text) {
+            return handle_list(&self.db, &self.whatsapp, phone).await;
+        }
+
+        if is_help_command(text) {
+            return handle_help(&self.whatsapp, phone).await;
+        }
+
+        if let Some(selection) = parse_switch_selection(text) {
+            return handle_switch(&self.db, &self.whatsapp, phone, selection).await;
+        }
+
+        if let Some(role) = is_new_conversation_command(text) {
+            return onboarding::start_new_conversation(&self.db, &self.whatsapp, phone, role).await;
+        }
+
+        match self.db.resolve_participant_for_message(phone).await? {
+            ParticipantResolve::NotRegistered => {
+                onboarding::handle_new_or_onboarding_user(&self.db, &self.whatsapp, phone, text)
+                    .await
             }
-        };
-
-        let conversation = self.db.get_conversation(participant.conversation_id).await?;
-
-        if !self
-            .db
-            .conversation_has_both_participants(conversation.id)
-            .await?
-        {
-            if let Some(invite) = self
-                .db
-                .find_pending_invite_for_conversation(conversation.id)
-                .await?
-            {
+            ParticipantResolve::PickConversation => {
+                self.whatsapp
+                    .send_text(
+                        phone,
+                        "You have multiple conversations. Reply LIST to see them, then SWITCH <number> to pick one.",
+                    )
+                    .await?;
+                handle_list(&self.db, &self.whatsapp, phone).await
+            }
+            ParticipantResolve::WaitingInvite { invite, .. } => {
                 self.whatsapp
                     .send_text(
                         phone,
@@ -83,26 +103,30 @@ impl Bot {
                         ),
                     )
                     .await?;
-            } else {
-                self.db.delete_conversation(conversation.id).await?;
+                Ok(())
+            }
+            ParticipantResolve::StaleIncomplete { conversation_id } => {
+                self.db.delete_conversation(conversation_id).await?;
                 self.whatsapp
                     .send_text(
                         phone,
-                        "This conversation is no longer active. Reply LEARNER or TEACHER to start over.",
+                        "That conversation is no longer active. Reply LEARNER or TEACHER to start a new one.",
                     )
                     .await?;
+                Ok(())
             }
-            return Ok(());
-        }
-
-        match participant.role {
-            ParticipantRole::Teacher => {
-                self.handle_teacher_message(&participant, text, &conversation)
-                    .await
-            }
-            ParticipantRole::Learner => {
-                self.handle_learner_message(&participant, text, &conversation)
-                    .await
+            ParticipantResolve::Ready(participant) => {
+                let conversation = self.db.get_conversation(participant.conversation_id).await?;
+                match participant.role {
+                    ParticipantRole::Teacher => {
+                        self.handle_teacher_message(&participant, text, &conversation)
+                            .await
+                    }
+                    ParticipantRole::Learner => {
+                        self.handle_learner_message(&participant, text, &conversation)
+                            .await
+                    }
+                }
             }
         }
     }
@@ -147,6 +171,9 @@ impl Bot {
         let (new_session, teacher_message) = flow::begin_review(text.to_string());
         self.db
             .save_learner_session(learner.id, &new_session)
+            .await?;
+        self.db
+            .set_active_conversation(&learner.phone, conversation.id)
             .await?;
 
         self.whatsapp

@@ -20,11 +20,34 @@ pub struct Conversation {
     pub source_language: String,
 }
 
+#[derive(Clone)]
 pub struct Participant {
     pub id: i64,
     pub conversation_id: i64,
     pub phone: String,
     pub role: ParticipantRole,
+}
+
+pub struct ConversationListing {
+    pub conversation_id: i64,
+    pub target_language: String,
+    pub role: ParticipantRole,
+    pub partner_phone: Option<String>,
+    pub is_active: bool,
+    pub is_pending: bool,
+}
+
+pub enum ParticipantResolve {
+    Ready(Participant),
+    WaitingInvite {
+        participant: Participant,
+        invite: ConversationInvite,
+    },
+    StaleIncomplete {
+        conversation_id: i64,
+    },
+    PickConversation,
+    NotRegistered,
 }
 
 pub struct ConversationInvite {
@@ -238,28 +261,190 @@ impl Db {
         })
     }
 
+    pub async fn resolve_participant_for_message(
+        &self,
+        phone: &str,
+    ) -> anyhow::Result<ParticipantResolve> {
+        let phone = normalize_phone(phone);
+        let participants = self.find_all_participants_by_phone(&phone).await?;
+
+        if participants.is_empty() {
+            return Ok(ParticipantResolve::NotRegistered);
+        }
+
+        let mut complete = Vec::new();
+        let mut incomplete = Vec::new();
+        for participant in participants {
+            if self
+                .conversation_has_both_participants(participant.conversation_id)
+                .await?
+            {
+                complete.push(participant);
+            } else {
+                incomplete.push(participant);
+            }
+        }
+
+        if let Some(active_id) = self.get_active_conversation_id(&phone).await? {
+            if let Some(participant) = incomplete
+                .iter()
+                .find(|participant| participant.conversation_id == active_id)
+            {
+                if let Some(invite) = self
+                    .find_pending_invite_for_conversation(participant.conversation_id)
+                    .await?
+                {
+                    return Ok(ParticipantResolve::WaitingInvite {
+                        participant: participant.clone(),
+                        invite,
+                    });
+                }
+                return Ok(ParticipantResolve::StaleIncomplete {
+                    conversation_id: participant.conversation_id,
+                });
+            }
+
+            if let Some(participant) = complete
+                .iter()
+                .find(|participant| participant.conversation_id == active_id)
+            {
+                return Ok(ParticipantResolve::Ready(participant.clone()));
+            }
+        }
+
+        match complete.len() {
+            0 => {
+                if incomplete.len() == 1 {
+                    let participant = incomplete.into_iter().next().unwrap();
+                    if let Some(invite) = self
+                        .find_pending_invite_for_conversation(participant.conversation_id)
+                        .await?
+                    {
+                        return Ok(ParticipantResolve::WaitingInvite {
+                            participant,
+                            invite,
+                        });
+                    }
+                    return Ok(ParticipantResolve::StaleIncomplete {
+                        conversation_id: participant.conversation_id,
+                    });
+                }
+                Ok(ParticipantResolve::NotRegistered)
+            }
+            1 => {
+                let participant = complete.into_iter().next().unwrap();
+                self.set_active_conversation(&phone, participant.conversation_id)
+                    .await?;
+                Ok(ParticipantResolve::Ready(participant))
+            }
+            _ => Ok(ParticipantResolve::PickConversation),
+        }
+    }
+
+    pub async fn list_conversations_for_phone(
+        &self,
+        phone: &str,
+    ) -> anyhow::Result<Vec<ConversationListing>> {
+        let phone = normalize_phone(phone);
+        let active_id = self.get_active_conversation_id(&phone).await?;
+        let participants = self.find_all_participants_by_phone(&phone).await?;
+        let mut listings = Vec::new();
+
+        for participant in participants {
+            let conversation = self.get_conversation(participant.conversation_id).await?;
+            let is_pending = !self
+                .conversation_has_both_participants(participant.conversation_id)
+                .await?;
+            let partner_phone = if is_pending {
+                self.find_pending_invite_for_conversation(participant.conversation_id)
+                    .await?
+                    .map(|invite| {
+                        if invite.inviter_phone == phone {
+                            invite.invitee_phone
+                        } else {
+                            invite.inviter_phone
+                        }
+                    })
+            } else {
+                self.find_partner_phone(participant.conversation_id, &phone)
+                    .await?
+            };
+
+            listings.push(ConversationListing {
+                conversation_id: participant.conversation_id,
+                target_language: conversation.target_language,
+                role: participant.role,
+                partner_phone,
+                is_active: active_id == Some(participant.conversation_id),
+                is_pending,
+            });
+        }
+
+        listings.sort_by(|left, right| {
+            right
+                .is_active
+                .cmp(&left.is_active)
+                .then_with(|| left.is_pending.cmp(&right.is_pending))
+                .then_with(|| left.conversation_id.cmp(&right.conversation_id))
+        });
+
+        Ok(listings)
+    }
+
+    pub async fn find_complete_conversation_between(
+        &self,
+        phone_a: &str,
+        phone_b: &str,
+    ) -> anyhow::Result<Option<i64>> {
+        let phone_a = normalize_phone(phone_a);
+        let phone_b = normalize_phone(phone_b);
+
+        let conversation_id: Option<i64> = sqlx::query_scalar(
+            "SELECT p1.conversation_id
+             FROM participants p1
+             JOIN participants p2 ON p1.conversation_id = p2.conversation_id
+             WHERE p1.phone = ? AND p2.phone = ?",
+        )
+        .bind(phone_a)
+        .bind(phone_b)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(conversation_id) = conversation_id else {
+            return Ok(None);
+        };
+
+        if self.conversation_has_both_participants(conversation_id).await? {
+            Ok(Some(conversation_id))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn find_partner_phone(
+        &self,
+        conversation_id: i64,
+        phone: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let phone = normalize_phone(phone);
+        let partner_phone: Option<String> = sqlx::query_scalar(
+            "SELECT phone FROM participants WHERE conversation_id = ? AND phone != ? LIMIT 1",
+        )
+        .bind(conversation_id)
+        .bind(phone)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(partner_phone)
+    }
+
     pub async fn find_participant_for_phone(
         &self,
         phone: &str,
     ) -> anyhow::Result<Option<Participant>> {
-        let phone = normalize_phone(phone);
-
-        if let Some(active_id) = self.get_active_conversation_id(&phone).await? {
-            if let Some(participant) = self
-                .find_participant_in_conversation(&phone, active_id)
-                .await?
-            {
-                return Ok(Some(participant));
-            }
-        }
-
-        let participants = self.find_all_participants_by_phone(&phone).await?;
-        match participants.len() {
-            0 => Ok(None),
-            1 => Ok(Some(participants.into_iter().next().unwrap())),
-            _ => anyhow::bail!(
-                "you are in multiple conversations — conversation switching is not supported yet"
-            ),
+        match self.resolve_participant_for_message(phone).await? {
+            ParticipantResolve::Ready(participant) => Ok(Some(participant)),
+            _ => Ok(None),
         }
     }
 

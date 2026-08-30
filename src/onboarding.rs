@@ -5,6 +5,31 @@ use anyhow::Context;
 use crate::phone::{display_phone, normalize_phone};
 use crate::whatsapp::WhatsApp;
 
+pub async fn start_new_conversation(
+    db: &Db,
+    whatsapp: &WhatsApp,
+    phone: &str,
+    role: ParticipantRole,
+) -> anyhow::Result<()> {
+    db.clear_onboarding_session(phone).await?;
+
+    let mut data = OnboardingData::default();
+    data.role = Some(role);
+    db.save_onboarding_session(phone, OnboardingStep::EnterPartnerPhone, &data)
+        .await?;
+
+    let prompt = match role {
+        ParticipantRole::Learner => {
+            "Send your teacher's phone number with country code (e.g. +4791234567)."
+        }
+        ParticipantRole::Teacher => {
+            "Send your learner's phone number with country code (e.g. +14155551234)."
+        }
+    };
+    whatsapp.send_text(phone, prompt).await?;
+    Ok(())
+}
+
 pub async fn handle_new_or_onboarding_user(
     db: &Db,
     whatsapp: &WhatsApp,
@@ -184,25 +209,18 @@ async fn send_invite(
         .clone()
         .unwrap_or_else(default_source_language);
 
-    if db.find_participant_for_phone(phone).await?.is_some() {
-        whatsapp
-            .send_text(
-                phone,
-                "You're already in a conversation. Multiple conversations per person aren't supported yet.",
-            )
-            .await?;
-        return Ok(());
-    }
-
     if db
-        .find_participant_for_phone(partner_phone)
+        .find_complete_conversation_between(phone, partner_phone)
         .await?
         .is_some()
     {
         whatsapp
             .send_text(
                 phone,
-                "That person is already in a conversation. Ask them to use a different number or wait for multi-conversation support.",
+                &format!(
+                    "You're already connected with {}. Reply LIST to see your conversations.",
+                    display_phone(partner_phone)
+                ),
             )
             .await?;
         return Ok(());
@@ -265,13 +283,17 @@ async fn accept_invite(
         anyhow::bail!("invite phone mismatch");
     }
 
-    if db.find_participant_for_phone(phone).await?.is_some() {
+    if db
+        .find_complete_conversation_between(&invite.inviter_phone, phone)
+        .await?
+        .is_some()
+    {
         whatsapp
-            .send_text(
-                phone,
-                "You're already in a conversation. Multiple conversations per person aren't supported yet.",
-            )
+            .send_text(phone, "You're already connected with this person.")
             .await?;
+        db.update_invite_status(invite.id, crate::db::InviteStatus::Declined)
+            .await?;
+        db.delete_conversation(invite.conversation_id).await?;
         return Ok(());
     }
 
@@ -296,7 +318,8 @@ async fn accept_invite(
                 .send_text(
                     phone,
                     &format!(
-                        "You're connected! Send messages in {} and molvakt will forward them to your learner.",
+                        "You're connected! Send messages in {} and molvakt will forward them to your learner.\n\n\
+                         Reply LIST to see all your conversations.",
                         conversation.target_language
                     ),
                 )
@@ -307,7 +330,8 @@ async fn accept_invite(
                 .send_text(
                     phone,
                     &format!(
-                        "You're connected! You'll practice {} here — reply when your teacher messages you.",
+                        "You're connected! You'll practice {} here — reply when your teacher messages you.\n\n\
+                         Reply LIST to see all your conversations.",
                         conversation.target_language
                     ),
                 )
@@ -319,7 +343,7 @@ async fn accept_invite(
         .send_text(
             &invite.inviter_phone,
             &format!(
-                "{} accepted your invite! You can start messaging.",
+                "You're connected to {}! Reply LIST to see all conversations or just start messaging.",
                 display_phone(phone)
             ),
         )
@@ -360,7 +384,8 @@ async fn send_welcome(whatsapp: &WhatsApp, phone: &str) -> anyhow::Result<()> {
             phone,
             "Welcome to molvakt!\n\n\
              Reply LEARNER if you're practicing a language.\n\
-             Reply TEACHER if you're the native speaker.",
+             Reply TEACHER if you're the native speaker.\n\n\
+             Already set up? Reply LIST or HELP.",
         )
         .await
 }
