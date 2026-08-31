@@ -36,6 +36,26 @@ pub struct ConversationListing {
     pub partner_display_name: Option<String>,
     pub is_active: bool,
     pub is_pending: bool,
+    pub turn: Option<ConversationTurnStatus>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConversationTurnStatus {
+    YourTurnToSend,
+    YourTurnToReply,
+    WaitingForReply,
+    WaitingForMessage,
+}
+
+impl ConversationTurnStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::YourTurnToSend => "your turn to send",
+            Self::YourTurnToReply => "your turn to reply",
+            Self::WaitingForReply => "waiting for reply",
+            Self::WaitingForMessage => "waiting for message",
+        }
+    }
 }
 
 pub enum ParticipantResolve {
@@ -377,6 +397,15 @@ impl Db {
                 None
             };
 
+            let turn = if is_pending {
+                None
+            } else {
+                Some(
+                    self.turn_status_for_participant(&participant)
+                        .await?,
+                )
+            };
+
             listings.push(ConversationListing {
                 conversation_id: participant.conversation_id,
                 target_language: conversation.target_language,
@@ -385,6 +414,7 @@ impl Db {
                 partner_display_name,
                 is_active: active_id == Some(participant.conversation_id),
                 is_pending,
+                turn,
             });
         }
 
@@ -397,6 +427,37 @@ impl Db {
         });
 
         Ok(listings)
+    }
+
+    pub async fn turn_status_for_participant(
+        &self,
+        participant: &Participant,
+    ) -> anyhow::Result<ConversationTurnStatus> {
+        match participant.role {
+            ParticipantRole::Teacher => {
+                let learner = self
+                    .find_participant_by_role(participant.conversation_id, ParticipantRole::Learner)
+                    .await?;
+                let session = if let Some(learner) = learner {
+                    self.load_learner_session(learner.id).await?
+                } else {
+                    LearnerSession::Idle
+                };
+                if session == LearnerSession::Idle {
+                    Ok(ConversationTurnStatus::YourTurnToSend)
+                } else {
+                    Ok(ConversationTurnStatus::WaitingForReply)
+                }
+            }
+            ParticipantRole::Learner => {
+                let session = self.load_learner_session(participant.id).await?;
+                if session == LearnerSession::Idle {
+                    Ok(ConversationTurnStatus::WaitingForMessage)
+                } else {
+                    Ok(ConversationTurnStatus::YourTurnToReply)
+                }
+            }
+        }
     }
 
     pub async fn update_target_language(
@@ -853,7 +914,7 @@ impl Db {
         Ok(())
     }
 
-    async fn get_active_conversation_id(&self, phone: &str) -> anyhow::Result<Option<i64>> {
+    pub async fn get_active_conversation_id(&self, phone: &str) -> anyhow::Result<Option<i64>> {
         let row = sqlx::query(
             "SELECT active_conversation_id FROM user_settings WHERE phone = ?",
         )

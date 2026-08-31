@@ -1,9 +1,9 @@
 use anyhow::Context;
 
 use crate::conversations::{
-    handle_cancel, handle_help, handle_list, handle_set_language, handle_switch, is_help_command,
-    is_list_command, is_new_conversation_command, parse_cancel_selection, parse_set_language,
-    parse_switch_selection,
+    format_chat_label, handle_cancel, handle_help, handle_list, handle_set_language, handle_switch,
+    is_help_command, is_list_command, is_new_conversation_command, parse_cancel_selection,
+    parse_set_language, parse_switch_selection,
 };
 use crate::db::{Conversation, Db, MessageRole, Participant, ParticipantResolve, ParticipantRole};
 use crate::flow::{self, LearnerSession};
@@ -192,8 +192,12 @@ impl Bot {
             .insert_message(conversation.id, MessageRole::Teacher, text)
             .await?;
 
+        let previous_active = self
+            .db
+            .get_active_conversation_id(&learner.phone)
+            .await?;
         let teacher_name = self.db.get_display_name(&teacher.phone).await?;
-        let (new_session, teacher_message) = flow::begin_review(
+        let (new_session, mut teacher_message) = flow::begin_review(
             text.to_string(),
             &partner_label(
                 &teacher.phone,
@@ -201,6 +205,15 @@ impl Bot {
                 teacher_name.as_deref(),
             ),
         );
+        if previous_active.is_some() && previous_active != Some(conversation.id) {
+            let chat_label = format_chat_label(
+                ParticipantRole::Learner,
+                &conversation.target_language,
+                &teacher.phone,
+                teacher_name.as_deref(),
+            );
+            teacher_message.push_str(&format!("\n\n(Switched active chat to {chat_label}.)"));
+        }
         self.db
             .save_learner_session(learner.id, &new_session)
             .await?;
@@ -213,8 +226,15 @@ impl Bot {
             .await?;
         self.send_review_choices(&learner.phone).await?;
 
+        let learner_name = self.db.get_display_name(&learner.phone).await?;
         self.whatsapp
-            .send_text(&teacher.phone, "Message sent to the learner.")
+            .send_text(
+                &teacher.phone,
+                &format!(
+                    "Message sent to {} (learner).",
+                    contact_label(&learner.phone, learner_name.as_deref())
+                ),
+            )
             .await?;
 
         Ok(())

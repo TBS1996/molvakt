@@ -10,6 +10,23 @@ fn format_language_name(language: &str) -> String {
     }
 }
 
+fn format_listing_status(listing: &crate::db::ConversationListing) -> String {
+    let mut tags = Vec::new();
+    if listing.is_active {
+        tags.push("active");
+    }
+    if listing.is_pending {
+        tags.push("waiting for partner");
+    } else if let Some(turn) = listing.turn {
+        tags.push(turn.label());
+    }
+    if tags.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", tags.join(", "))
+    }
+}
+
 fn format_listing_line(
     index: usize,
     listing: &crate::db::ConversationListing,
@@ -32,13 +49,7 @@ fn format_listing_line(
         crate::db::ParticipantRole::Learner => format!("You learn {language}"),
     };
 
-    let status = if listing.is_pending {
-        " [waiting for partner]"
-    } else if listing.is_active {
-        " [active]"
-    } else {
-        ""
-    };
+    let status = format_listing_status(listing);
 
     if broken {
         format!(
@@ -46,6 +57,20 @@ fn format_listing_line(
         )
     } else {
         format!("{index}. {role_desc} — partner: {partner}{status}")
+    }
+}
+
+pub fn format_chat_label(
+    role: crate::db::ParticipantRole,
+    language: &str,
+    partner_phone: &str,
+    partner_display_name: Option<&str>,
+) -> String {
+    let language = format_language_name(language);
+    let partner = contact_label(partner_phone, partner_display_name);
+    match role {
+        crate::db::ParticipantRole::Learner => format!("{language} with {partner}"),
+        crate::db::ParticipantRole::Teacher => format!("teaching {language} to {partner}"),
     }
 }
 
