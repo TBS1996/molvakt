@@ -195,12 +195,55 @@ impl OnboardingStep {
     }
 
     fn from_str(step: &str) -> anyhow::Result<Self> {
+        if step.starts_with("menu_") {
+            anyhow::bail!("not an onboarding step: {step}");
+        }
         match step {
             "welcome" => Ok(Self::Welcome),
             "enter_partner_phone" => Ok(Self::EnterPartnerPhone),
             "enter_target_language" => Ok(Self::EnterTargetLanguage),
             "enter_exchange_learning_language" => Ok(Self::EnterExchangeLearningLanguage),
             other => anyhow::bail!("unknown onboarding step: {other}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MenuAction {
+    Switch,
+    SetMode,
+    SetLanguage,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MenuData {
+    pub action: Option<MenuAction>,
+    pub conversation_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MenuStep {
+    PickConversation,
+    PickMode,
+    AwaitLanguage,
+}
+
+impl MenuStep {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PickConversation => "menu_pick_conversation",
+            Self::PickMode => "menu_pick_mode",
+            Self::AwaitLanguage => "menu_await_language",
+        }
+    }
+
+    fn from_str(step: &str) -> anyhow::Result<Self> {
+        match step {
+            "menu_pick_conversation" => Ok(Self::PickConversation),
+            "menu_pick_mode" => Ok(Self::PickMode),
+            "menu_await_language" => Ok(Self::AwaitLanguage),
+            other => anyhow::bail!("unknown menu step: {other}"),
         }
     }
 }
@@ -1311,7 +1354,12 @@ impl Db {
             return Ok(None);
         };
 
-        let step = OnboardingStep::from_str(row.get::<String, _>("step").as_str())?;
+        let step_str: String = row.get("step");
+        if step_str.starts_with("menu_") {
+            return Ok(None);
+        }
+
+        let step = OnboardingStep::from_str(&step_str)?;
         let data: OnboardingData = serde_json::from_str(row.get("data_json"))?;
         Ok(Some((step, data)))
     }
@@ -1364,6 +1412,60 @@ impl Db {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    pub async fn save_menu_session(
+        &self,
+        phone: &str,
+        step: MenuStep,
+        data: &MenuData,
+    ) -> anyhow::Result<()> {
+        let phone = normalize_phone(phone);
+        let data_json = serde_json::to_string(data)?;
+        sqlx::query(
+            "INSERT INTO onboarding_sessions (phone, step, data_json, updated_at)
+             VALUES (?, ?, ?, datetime('now'))
+             ON CONFLICT(phone) DO UPDATE SET
+               step = excluded.step,
+               data_json = excluded.data_json,
+               updated_at = excluded.updated_at",
+        )
+        .bind(phone)
+        .bind(step.as_str())
+        .bind(data_json)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn load_menu_session(
+        &self,
+        phone: &str,
+    ) -> anyhow::Result<Option<(MenuStep, MenuData)>> {
+        let phone = normalize_phone(phone);
+        let row = sqlx::query(
+            "SELECT step, data_json FROM onboarding_sessions WHERE phone = ?",
+        )
+        .bind(phone)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let step_str: String = row.get("step");
+        if !step_str.starts_with("menu_") {
+            return Ok(None);
+        }
+
+        let step = MenuStep::from_str(&step_str)?;
+        let data: MenuData = serde_json::from_str(row.get("data_json"))?;
+        Ok(Some((step, data)))
+    }
+
+    pub async fn clear_menu_session(&self, phone: &str) -> anyhow::Result<()> {
+        self.clear_onboarding_session(phone).await
     }
 
     pub async fn init_learner_session(&self, participant_id: i64) -> anyhow::Result<()> {

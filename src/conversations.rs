@@ -1,4 +1,4 @@
-use crate::db::{ConversationMode, ConversationModeSetting, Db, SetModeError};
+use crate::db::{ConversationListing, ConversationMode, ConversationModeSetting, Db, SetModeError};
 use crate::phone::{contact_label, looks_like_phone, normalize_phone, phones_match};
 use crate::whatsapp::WhatsApp;
 
@@ -49,7 +49,7 @@ fn format_exchange_role_desc(
     format!("{label} — you learn {your_language}, partner learns {partner_language}")
 }
 
-fn format_listing_line(
+pub fn format_listing_line(
     index: usize,
     listing: &crate::db::ConversationListing,
     viewer_phone: &str,
@@ -123,14 +123,10 @@ pub async fn handle_list(db: &Db, whatsapp: &WhatsApp, phone: &str) -> anyhow::R
     }
 
     lines.push(String::new());
-    lines.push("Reply SWITCH <number> to change conversation.".into());
-    lines.push(
-        "Reply SET MODE <number> teacher|learner|exchange|exchange-turns to change mode.".into(),
-    );
-    lines.push("Reply CANCEL <number> to remove a pending invite.".into());
-    lines.push("Reply SET LANGUAGE <name> to fix the language on the active conversation.".into());
-    lines.push("Reply SET <number> <language> to fix a specific one.".into());
-    lines.push("Reply LEARNER, TEACHER, EXCHANGE, or EXCHANGE-TURNS to start a new one.".into());
+    lines.push("Reply MENU for actions, or use text commands:".into());
+    lines.push("SWITCH <number>, SET MODE <number> <mode>, CANCEL <number>.".into());
+    lines.push("SET LANGUAGE <name>, or SET <number> <language>.".into());
+    lines.push("LEARNER, TEACHER, EXCHANGE, or EXCHANGE-TURNS to start a new one.".into());
 
     whatsapp.send_text(phone, &lines.join("\n")).await?;
     Ok(())
@@ -421,11 +417,20 @@ pub async fn handle_cancel(
     let listings = db.list_conversations_for_phone(phone).await?;
     let Some(listing) = listings.get(selection.saturating_sub(1)) else {
         whatsapp
-            .send_text(phone, "Invalid selection. Reply LIST to see your conversations.")
+            .send_text(phone, "Invalid selection. Reply MENU or LIST to see your conversations.")
             .await?;
         return Ok(());
     };
 
+    handle_cancel_listing(db, whatsapp, phone, listing).await
+}
+
+pub async fn handle_cancel_listing(
+    db: &Db,
+    whatsapp: &WhatsApp,
+    phone: &str,
+    listing: &ConversationListing,
+) -> anyhow::Result<()> {
     let viewer_phone = normalize_phone(phone);
     let broken = listing
         .partner_phone
@@ -539,6 +544,7 @@ pub async fn handle_help(whatsapp: &WhatsApp, phone: &str) -> anyhow::Result<()>
         .send_text(
             phone,
             "molvakt commands:\n\n\
+             MENU — open the action menu (recommended)\n\
              LIST — show your conversations\n\
              SWITCH <number> — change active conversation\n\
              SET MODE <number> teacher|learner|exchange|exchange-turns — change conversation mode\n\

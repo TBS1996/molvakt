@@ -5,6 +5,7 @@ mod db;
 mod flow;
 mod history;
 mod llm;
+mod menu;
 mod onboarding;
 mod phone;
 mod server;

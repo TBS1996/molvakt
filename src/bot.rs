@@ -12,6 +12,7 @@ use crate::db::{
 };
 use crate::flow::{self, LearnerSession};
 use crate::llm::Llm;
+use crate::menu::{handle_menu_command, handle_menu_selection, handle_menu_session, is_menu_command};
 use crate::onboarding;
 use crate::phone::{contact_label, partner_label};
 use crate::whatsapp::WhatsApp;
@@ -82,6 +83,18 @@ impl Bot {
             .await;
         }
 
+        if let Some((step, data)) = self.db.load_menu_session(phone).await? {
+            return handle_menu_session(&self.db, &self.whatsapp, phone, text, step, data).await;
+        }
+
+        if is_menu_command(text) {
+            return handle_menu_command(&self.db, &self.whatsapp, phone).await;
+        }
+
+        if handle_menu_selection(&self.db, &self.whatsapp, phone, text).await? {
+            return Ok(());
+        }
+
         if is_list_command(text) {
             return handle_list(&self.db, &self.whatsapp, phone).await;
         }
@@ -132,10 +145,10 @@ impl Bot {
                 self.whatsapp
                     .send_text(
                         phone,
-                        "You have multiple conversations. Reply LIST to see them, then SWITCH <number> to pick one.",
+                        "You have multiple conversations. Reply MENU to pick one, or LIST to see them all.",
                     )
                     .await?;
-                handle_list(&self.db, &self.whatsapp, phone).await
+                handle_menu_command(&self.db, &self.whatsapp, phone).await
             }
             ParticipantResolve::WaitingInvite { invite, .. } => {
                 let invitee_name = self.db.get_display_name(&invite.invitee_phone).await?;
