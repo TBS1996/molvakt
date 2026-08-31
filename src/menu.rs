@@ -231,7 +231,7 @@ async fn send_main_menu(db: &Db, whatsapp: &WhatsApp, phone: &str) -> anyhow::Re
 }
 
 async fn send_start_menu(whatsapp: &WhatsApp, phone: &str) -> anyhow::Result<()> {
-    onboarding::send_welcome_menu(whatsapp, phone).await
+    onboarding::send_new_conversation_menu(whatsapp, phone).await
 }
 
 async fn send_mode_menu(whatsapp: &WhatsApp, phone: &str, partner: &str) -> anyhow::Result<()> {

@@ -640,44 +640,76 @@ async fn decline_invite(
 }
 
 async fn send_welcome(whatsapp: &WhatsApp, phone: &str) -> anyhow::Result<()> {
+    send_mode_picker(
+        whatsapp,
+        phone,
+        "Welcome to molvakt!\n\n\
+         Practice languages with a partner over WhatsApp. molvakt checks your messages, \
+         gives grammar help in English, and forwards them to your partner.\n\n\
+         Modes:\n\
+         • Learner — you practice; your partner teaches you\n\
+         • Teacher — you teach; your partner practices\n\
+         • Exchange — each writes in the language they're learning, anytime\n\
+         • Exchange (turns) — same, but you take turns (one message each)\n\n\
+         Already set up? Reply LIST or HELP.",
+        "Choose mode",
+        "Get started",
+    )
+    .await
+}
+
+pub async fn send_new_conversation_menu(whatsapp: &WhatsApp, phone: &str) -> anyhow::Result<()> {
+    send_mode_picker(
+        whatsapp,
+        phone,
+        "Add a new conversation — pick a mode, then send your partner's phone number.",
+        "Choose mode",
+        "New chat",
+    )
+    .await
+}
+
+async fn send_mode_picker(
+    whatsapp: &WhatsApp,
+    phone: &str,
+    body: &str,
+    button_label: &str,
+    section_title: &str,
+) -> anyhow::Result<()> {
     whatsapp
         .send_list_menu(
             phone,
-            "Welcome to molvakt!\n\n\
-             Practice languages with a partner over WhatsApp. molvakt checks your messages, \
-             gives grammar help in English, and forwards them to your partner.\n\n\
-             Modes:\n\
-             • Learner — you practice; your partner teaches you\n\
-             • Teacher — you teach; your partner practices\n\
-             • Exchange — each writes in the language they're learning, anytime\n\
-             • Exchange (turns) — same, but you take turns (one message each)\n\n\
-             Already set up? Reply LIST or HELP.",
-            "Choose mode",
-            "Get started",
-            &[
-                (
-                    MODE_LEARNER,
-                    "Learner",
-                    "Practice a language with a native speaker",
-                ),
-                (
-                    MODE_TEACHER,
-                    "Teacher",
-                    "Teach your language to someone practicing",
-                ),
-                (
-                    MODE_EXCHANGE,
-                    "Exchange",
-                    "Write in your learning language anytime",
-                ),
-                (
-                    MODE_EXCHANGE_TURNS,
-                    "Exchange (turns)",
-                    "Take turns, one message each",
-                ),
-            ],
+            body,
+            button_label,
+            section_title,
+            &mode_menu_rows(),
         )
         .await
+}
+
+fn mode_menu_rows() -> [(&'static str, &'static str, &'static str); 4] {
+    [
+        (
+            MODE_LEARNER,
+            "Learner",
+            "Practice a language with a native speaker",
+        ),
+        (
+            MODE_TEACHER,
+            "Teacher",
+            "Teach your language to someone practicing",
+        ),
+        (
+            MODE_EXCHANGE,
+            "Exchange",
+            "Write in your learning language anytime",
+        ),
+        (
+            MODE_EXCHANGE_TURNS,
+            "Exchange (turns)",
+            "Take turns, one message each",
+        ),
+    ]
 }
 
 pub async fn send_welcome_menu(whatsapp: &WhatsApp, phone: &str) -> anyhow::Result<()> {
@@ -713,8 +745,5 @@ async fn send_partner_phone_prompt(
 
 async fn cancel_onboarding(db: &Db, whatsapp: &WhatsApp, phone: &str) -> anyhow::Result<()> {
     db.clear_onboarding_session(phone).await?;
-    send_welcome(whatsapp, phone).await?;
-    db.save_onboarding_session(phone, OnboardingStep::Welcome, &OnboardingData::default())
-        .await?;
-    Ok(())
+    send_new_conversation_menu(whatsapp, phone).await
 }
