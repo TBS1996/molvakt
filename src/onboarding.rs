@@ -1,5 +1,5 @@
 use crate::db::{
-    ConversationInvite, Db, OnboardingData, OnboardingStep, ParticipantRole,
+    ConversationInvite, ConversationMode, Db, OnboardingData, OnboardingStep, ParticipantRole,
 };
 use anyhow::Context;
 use crate::phone::{contact_label, looks_like_phone, normalize_phone, phones_match};
@@ -14,6 +14,7 @@ pub async fn start_new_conversation(
     db.clear_onboarding_session(phone).await?;
 
     let mut data = OnboardingData::default();
+    data.mode = Some(ConversationMode::Tutor);
     data.role = Some(role);
     db.save_onboarding_session(phone, OnboardingStep::EnterPartnerPhone, &data)
         .await?;
@@ -42,28 +43,10 @@ pub async fn handle_new_or_onboarding_user(
 
     match text.trim().to_ascii_uppercase().as_str() {
         "LEARNER" => {
-            let mut data = OnboardingData::default();
-            data.role = Some(ParticipantRole::Learner);
-            db.save_onboarding_session(phone, OnboardingStep::EnterPartnerPhone, &data)
-                .await?;
-            whatsapp
-                .send_text(
-                    phone,
-                    "Send your teacher's phone number with country code (e.g. +4791234567).",
-                )
-                .await?;
+            start_new_conversation(db, whatsapp, phone, ParticipantRole::Learner).await?;
         }
         "TEACHER" => {
-            let mut data = OnboardingData::default();
-            data.role = Some(ParticipantRole::Teacher);
-            db.save_onboarding_session(phone, OnboardingStep::EnterPartnerPhone, &data)
-                .await?;
-            whatsapp
-                .send_text(
-                    phone,
-                    "Send your learner's phone number with country code (e.g. +14155551234).",
-                )
-                .await?;
+            start_new_conversation(db, whatsapp, phone, ParticipantRole::Teacher).await?;
         }
         _ => {
             send_welcome(whatsapp, phone).await?;
@@ -89,21 +72,35 @@ pub async fn handle_invite_response(
             let conversation = db.get_conversation(invite.conversation_id).await?;
             let inviter_name = db.get_display_name(&invite.inviter_phone).await?;
             let inviter = contact_label(&invite.inviter_phone, inviter_name.as_deref());
-            let invitee_role = invite.inviter_role.opposite();
-            let role_label = match invitee_role {
-                ParticipantRole::Teacher => "teacher",
-                ParticipantRole::Learner => "learner",
-            };
-            whatsapp
-                .send_text(
-                    phone,
-                    &format!(
-                        "You have a pending invite from {inviter} to practice {} as their {role_label}.\n\n\
-                         Reply ACCEPT or DECLINE.",
-                        conversation.target_language
-                    ),
-                )
-                .await?;
+            if conversation.mode == ConversationMode::Exchange {
+                whatsapp
+                    .send_text(
+                        phone,
+                        &format!(
+                            "You have a pending language exchange invite from {inviter}. \
+                             They want to learn {}.\n\n\
+                             Reply ACCEPT or DECLINE.",
+                            conversation.target_language
+                        ),
+                    )
+                    .await?;
+            } else {
+                let invitee_role = invite.inviter_role.opposite();
+                let role_label = match invitee_role {
+                    ParticipantRole::Teacher => "teacher",
+                    ParticipantRole::Learner => "learner",
+                };
+                whatsapp
+                    .send_text(
+                        phone,
+                        &format!(
+                            "You have a pending invite from {inviter} to practice {} as their {role_label}.\n\n\
+                             Reply ACCEPT or DECLINE.",
+                            conversation.target_language
+                        ),
+                    )
+                    .await?;
+            }
             Ok(())
         }
     }
@@ -120,26 +117,10 @@ async fn continue_onboarding(
     match step {
         OnboardingStep::Welcome => match text.trim().to_ascii_uppercase().as_str() {
             "LEARNER" => {
-                data.role = Some(ParticipantRole::Learner);
-                db.save_onboarding_session(phone, OnboardingStep::EnterPartnerPhone, &data)
-                    .await?;
-                whatsapp
-                    .send_text(
-                        phone,
-                        "Send your teacher's phone number with country code (e.g. +4791234567).",
-                    )
-                    .await?;
+                start_new_conversation(db, whatsapp, phone, ParticipantRole::Learner).await?;
             }
             "TEACHER" => {
-                data.role = Some(ParticipantRole::Teacher);
-                db.save_onboarding_session(phone, OnboardingStep::EnterPartnerPhone, &data)
-                    .await?;
-                whatsapp
-                    .send_text(
-                        phone,
-                        "Send your learner's phone number with country code (e.g. +14155551234).",
-                    )
-                    .await?;
+                start_new_conversation(db, whatsapp, phone, ParticipantRole::Teacher).await?;
             }
             _ => send_welcome(whatsapp, phone).await?,
         },
@@ -164,9 +145,12 @@ async fn continue_onboarding(
             data.partner_phone = Some(partner_phone);
             db.save_onboarding_session(phone, OnboardingStep::EnterTargetLanguage, &data)
                 .await?;
-            whatsapp
-                .send_text(phone, "What language will you practice? (e.g. Norwegian)")
-                .await?;
+            let prompt = if data.mode == Some(ConversationMode::Exchange) {
+                "What language do you want to learn? (e.g. Norwegian)"
+            } else {
+                "What language will you practice? (e.g. Norwegian)"
+            };
+            whatsapp.send_text(phone, prompt).await?;
         }
         OnboardingStep::EnterTargetLanguage => {
             let target_language = text.trim();
@@ -195,6 +179,63 @@ async fn continue_onboarding(
             send_invite(db, whatsapp, phone, &data).await?;
             db.clear_onboarding_session(phone).await?;
         }
+        OnboardingStep::EnterExchangeLearningLanguage => {
+            let learning_language = text.trim();
+            if learning_language.is_empty() {
+                whatsapp
+                    .send_text(phone, "Please send the language name, e.g. German.")
+                    .await?;
+                return Ok(());
+            }
+            if looks_like_phone(learning_language) {
+                whatsapp
+                    .send_text(
+                        phone,
+                        "That looks like a phone number, not a language.\n\
+                         Send the language name, e.g. German.",
+                    )
+                    .await?;
+                return Ok(());
+            }
+
+            let conversation_id = data
+                .pending_conversation_id
+                .context("missing conversation during exchange setup")?;
+            db.update_learning_language(conversation_id, phone, learning_language)
+                .await?;
+            db.clear_onboarding_session(phone).await?;
+
+            let conversation = db.get_conversation(conversation_id).await?;
+            let inviter_language = conversation.target_language.clone();
+            let partner = db
+                .find_partner_participant(conversation_id, phone)
+                .await?
+                .context("missing exchange partner")?;
+            let partner_name = db.get_display_name(&partner.phone).await?;
+            let your_name = db.get_display_name(phone).await?;
+
+            whatsapp
+                .send_text(
+                    phone,
+                    &format!(
+                        "You're connected! You learn {learning_language}, {} learns {inviter_language}.\n\n\
+                         Write messages in {learning_language} and molvakt will forward them.",
+                        contact_label(&partner.phone, partner_name.as_deref())
+                    ),
+                )
+                .await?;
+
+            whatsapp
+                .send_text(
+                    &partner.phone,
+                    &format!(
+                        "{} joined the exchange! They learn {learning_language}, you learn {inviter_language}.\n\n\
+                         Write messages in {inviter_language} and molvakt will forward them.",
+                        contact_label(phone, your_name.as_deref())
+                    ),
+                )
+                .await?;
+        }
     }
 
     Ok(())
@@ -206,6 +247,7 @@ async fn send_invite(
     phone: &str,
     data: &OnboardingData,
 ) -> anyhow::Result<()> {
+    let mode = data.mode.unwrap_or(ConversationMode::Tutor);
     let role = data.role.context("missing role during invite")?;
     let partner_phone = data
         .partner_phone
@@ -263,13 +305,18 @@ async fn send_invite(
     }
 
     let conversation = db
-        .create_conversation(target_language, &source_language)
+        .create_conversation(mode, target_language, &source_language)
         .await?;
+    let learning_language = if mode == ConversationMode::Exchange {
+        Some(target_language.as_str())
+    } else {
+        None
+    };
     let inviter = db
-        .register_participant(conversation.id, phone, role)
+        .register_participant(conversation.id, phone, role, learning_language)
         .await?;
 
-    if role == ParticipantRole::Learner {
+    if mode == ConversationMode::Tutor && role == ParticipantRole::Learner {
         db.init_learner_session(inviter.id).await?;
     }
 
@@ -279,21 +326,33 @@ async fn send_invite(
 
     let inviter_name = db.get_display_name(phone).await?;
     let inviter_display = contact_label(phone, inviter_name.as_deref());
-    let invitee_role = role.opposite();
-    let role_label = match invitee_role {
-        ParticipantRole::Teacher => "teacher",
-        ParticipantRole::Learner => "learner",
-    };
 
-    whatsapp
-        .send_text(
-            partner_phone,
-            &format!(
-                "{inviter_display} wants to practice {target_language} with you as their {role_label}.\n\n\
-                 Reply ACCEPT or DECLINE."
-            ),
-        )
-        .await?;
+    if mode == ConversationMode::Exchange {
+        whatsapp
+            .send_text(
+                partner_phone,
+                &format!(
+                    "{inviter_display} wants a language exchange. They will learn {target_language}.\n\n\
+                     Reply ACCEPT or DECLINE."
+                ),
+            )
+            .await?;
+    } else {
+        let invitee_role = role.opposite();
+        let role_label = match invitee_role {
+            ParticipantRole::Teacher => "teacher",
+            ParticipantRole::Learner => "learner",
+        };
+        whatsapp
+            .send_text(
+                partner_phone,
+                &format!(
+                    "{inviter_display} wants to practice {target_language} with you as their {role_label}.\n\n\
+                     Reply ACCEPT or DECLINE."
+                ),
+            )
+            .await?;
+    }
 
     whatsapp
         .send_text(
@@ -335,9 +394,13 @@ async fn accept_invite(
     }
 
     let conversation = db.get_conversation(invite.conversation_id).await?;
+    if conversation.mode == ConversationMode::Exchange {
+        return accept_exchange_invite(db, whatsapp, phone, invite, &conversation).await;
+    }
+
     let invitee_role = invite.inviter_role.opposite();
     let invitee = db
-        .register_participant(invite.conversation_id, phone, invitee_role)
+        .register_participant(invite.conversation_id, phone, invitee_role, None)
         .await?;
 
     if invitee_role == ParticipantRole::Learner {
@@ -383,6 +446,41 @@ async fn accept_invite(
             &format!(
                 "You're connected to {}! Reply LIST to see all conversations or just start messaging.",
                 contact_label(phone, invitee_name.as_deref())
+            ),
+        )
+        .await?;
+
+    Ok(())
+}
+
+async fn accept_exchange_invite(
+    db: &Db,
+    whatsapp: &WhatsApp,
+    phone: &str,
+    invite: ConversationInvite,
+    conversation: &crate::db::Conversation,
+) -> anyhow::Result<()> {
+    let invitee_role = invite.inviter_role.opposite();
+    db.register_participant(
+        invite.conversation_id,
+        phone,
+        invitee_role,
+        Some(&conversation.source_language),
+    )
+    .await?;
+
+    db.update_invite_status(invite.id, crate::db::InviteStatus::Accepted)
+        .await?;
+    db.set_active_conversation(phone, invite.conversation_id).await?;
+    db.set_active_conversation(&invite.inviter_phone, invite.conversation_id)
+        .await?;
+
+    whatsapp
+        .send_text(
+            phone,
+            &format!(
+                "You're connected! Exchange mode — you learn {}. Write in that language.",
+                conversation.source_language
             ),
         )
         .await?;

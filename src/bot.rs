@@ -1,12 +1,14 @@
 use anyhow::Context;
 
 use crate::conversations::{
-    format_chat_label, handle_cancel, handle_help, handle_list, handle_set_language,
-    handle_swap_roles, handle_switch, is_help_command, is_list_command,
-    is_new_conversation_command, parse_cancel_selection, parse_set_language,
-    parse_swap_selection, parse_switch_selection,
+    format_chat_label, handle_cancel, handle_help, handle_list, handle_set_language, handle_set_mode,
+    handle_switch, is_help_command, is_list_command, is_new_conversation_command,
+    parse_cancel_selection, parse_set_language, parse_set_mode, parse_switch_selection,
 };
-use crate::db::{Conversation, Db, MessageRole, Participant, ParticipantResolve, ParticipantRole};
+use crate::db::{
+    Conversation, ConversationMode, Db, MessageRole, Participant, ParticipantResolve,
+    ParticipantRole,
+};
 use crate::flow::{self, LearnerSession};
 use crate::llm::Llm;
 use crate::onboarding;
@@ -91,16 +93,16 @@ impl Bot {
             return handle_switch(&self.db, &self.whatsapp, phone, selection).await;
         }
 
-        if let Some(selection) = parse_swap_selection(text) {
-            return handle_swap_roles(&self.db, &self.whatsapp, phone, selection).await;
-        }
-
-        if let Some(selection) = parse_cancel_selection(text) {
-            return handle_cancel(&self.db, &self.whatsapp, phone, selection).await;
+        if let Some(command) = parse_set_mode(text) {
+            return handle_set_mode(&self.db, &self.whatsapp, phone, command).await;
         }
 
         if let Some(command) = parse_set_language(text) {
             return handle_set_language(&self.db, &self.whatsapp, phone, command).await;
+        }
+
+        if let Some(selection) = parse_cancel_selection(text) {
+            return handle_cancel(&self.db, &self.whatsapp, phone, selection).await;
         }
 
         if let Some(role) = is_new_conversation_command(text) {
@@ -146,6 +148,11 @@ impl Bot {
             }
             ParticipantResolve::Ready(participant) => {
                 let conversation = self.db.get_conversation(participant.conversation_id).await?;
+                if conversation.mode == ConversationMode::Exchange {
+                    return self
+                        .handle_exchange_message(&participant, text, &conversation)
+                        .await;
+                }
                 match participant.role {
                     ParticipantRole::Teacher => {
                         self.handle_teacher_message(&participant, text, &conversation)
@@ -289,6 +296,74 @@ impl Bot {
                 }
             }
         }
+
+        Ok(())
+    }
+
+    async fn handle_exchange_message(
+        &self,
+        sender: &Participant,
+        text: &str,
+        conversation: &Conversation,
+    ) -> anyhow::Result<()> {
+        let partner = self
+            .db
+            .find_partner_participant(conversation.id, &sender.phone)
+            .await?
+            .context("no exchange partner registered yet")?;
+        let learning_language = sender
+            .learning_language
+            .as_deref()
+            .unwrap_or(&conversation.target_language);
+        let partner_learning_language = partner
+            .learning_language
+            .as_deref()
+            .unwrap_or(&conversation.source_language);
+
+        let history = self.db.load_history(conversation.id).await?;
+        let llm = Llm::for_exchange(learning_language, partner_learning_language)?;
+        let judgment = llm.validate_reply(text, &history).await?;
+        if !judgment.accepted {
+            self.whatsapp
+                .send_text(&sender.phone, &judgment.feedback)
+                .await?;
+            return Ok(());
+        }
+
+        self.db
+            .insert_exchange_message(conversation.id, sender, text)
+            .await?;
+
+        let sender_name = self.db.get_display_name(&sender.phone).await?;
+        let sender_label = contact_label(&sender.phone, sender_name.as_deref());
+        let mut outgoing = format!("[{sender_label}]: {text}");
+
+        let previous_active = self
+            .db
+            .get_active_conversation_id(&partner.phone)
+            .await?;
+        if previous_active.is_some() && previous_active != Some(conversation.id) {
+            let chat_label = format!(
+                "exchange — you learn {partner_learning_language} with {sender_label}"
+            );
+            outgoing.push_str(&format!("\n\n(Switched active chat to {chat_label}.)"));
+        }
+        self.db
+            .set_active_conversation(&partner.phone, conversation.id)
+            .await?;
+
+        self.whatsapp.send_text(&partner.phone, &outgoing).await?;
+
+        let partner_name = self.db.get_display_name(&partner.phone).await?;
+        self.whatsapp
+            .send_text(
+                &sender.phone,
+                &format!(
+                    "Message sent to {}.",
+                    contact_label(&partner.phone, partner_name.as_deref())
+                ),
+            )
+            .await?;
 
         Ok(())
     }

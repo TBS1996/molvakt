@@ -16,8 +16,32 @@ pub struct Db {
 
 pub struct Conversation {
     pub id: i64,
+    pub mode: ConversationMode,
     pub target_language: String,
     pub source_language: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConversationMode {
+    Tutor,
+    Exchange,
+}
+
+impl ConversationMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tutor => "tutor",
+            Self::Exchange => "exchange",
+        }
+    }
+
+    pub fn from_str(mode: &str) -> anyhow::Result<Self> {
+        match mode {
+            "tutor" => Ok(Self::Tutor),
+            "exchange" => Ok(Self::Exchange),
+            other => anyhow::bail!("unknown conversation mode: {other}"),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -26,12 +50,16 @@ pub struct Participant {
     pub conversation_id: i64,
     pub phone: String,
     pub role: ParticipantRole,
+    pub learning_language: Option<String>,
 }
 
 pub struct ConversationListing {
     pub conversation_id: i64,
+    pub mode: ConversationMode,
     pub target_language: String,
     pub role: ParticipantRole,
+    pub learning_language: Option<String>,
+    pub partner_learning_language: Option<String>,
     pub partner_phone: Option<String>,
     pub partner_display_name: Option<String>,
     pub is_active: bool,
@@ -59,25 +87,34 @@ impl ConversationTurnStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SwapRolesError {
+pub enum ConversationModeSetting {
+    Teacher,
+    Learner,
+    Exchange,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetModeError {
     NotParticipant,
     NotComplete,
     ActiveExchange,
+    MissingLanguage,
 }
 
-impl std::fmt::Display for SwapRolesError {
+impl std::fmt::Display for SetModeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotParticipant => write!(f, "not a participant in this conversation"),
-            Self::NotComplete => write!(f, "conversation is not ready for role swap"),
+            Self::NotComplete => write!(f, "conversation is not ready for mode change"),
             Self::ActiveExchange => {
                 write!(f, "learner is mid-exchange; wait until the current message is finished")
             }
+            Self::MissingLanguage => write!(f, "missing learning language for mode change"),
         }
     }
 }
 
-impl std::error::Error for SwapRolesError {}
+impl std::error::Error for SetModeError {}
 
 pub enum ParticipantResolve {
     Ready(Participant),
@@ -122,10 +159,12 @@ pub enum MessageRole {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OnboardingData {
+    pub mode: Option<ConversationMode>,
     pub role: Option<ParticipantRole>,
     pub partner_phone: Option<String>,
     pub target_language: Option<String>,
     pub source_language: Option<String>,
+    pub pending_conversation_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,6 +172,7 @@ pub enum OnboardingStep {
     Welcome,
     EnterPartnerPhone,
     EnterTargetLanguage,
+    EnterExchangeLearningLanguage,
 }
 
 impl OnboardingStep {
@@ -141,6 +181,7 @@ impl OnboardingStep {
             Self::Welcome => "welcome",
             Self::EnterPartnerPhone => "enter_partner_phone",
             Self::EnterTargetLanguage => "enter_target_language",
+            Self::EnterExchangeLearningLanguage => "enter_exchange_learning_language",
         }
     }
 
@@ -149,6 +190,7 @@ impl OnboardingStep {
             "welcome" => Ok(Self::Welcome),
             "enter_partner_phone" => Ok(Self::EnterPartnerPhone),
             "enter_target_language" => Ok(Self::EnterTargetLanguage),
+            "enter_exchange_learning_language" => Ok(Self::EnterExchangeLearningLanguage),
             other => anyhow::bail!("unknown onboarding step: {other}"),
         }
     }
@@ -237,12 +279,14 @@ impl Db {
 
     pub async fn create_conversation(
         &self,
+        mode: ConversationMode,
         target_language: &str,
         source_language: &str,
     ) -> anyhow::Result<Conversation> {
         let result = sqlx::query(
-            "INSERT INTO conversations (target_language, source_language) VALUES (?, ?)",
+            "INSERT INTO conversations (mode, target_language, source_language) VALUES (?, ?, ?)",
         )
+        .bind(mode.as_str())
         .bind(target_language)
         .bind(source_language)
         .execute(&self.pool)
@@ -250,18 +294,43 @@ impl Db {
 
         Ok(Conversation {
             id: result.last_insert_rowid(),
+            mode,
             target_language: target_language.to_string(),
             source_language: source_language.to_string(),
         })
     }
 
     pub async fn load_history(&self, conversation_id: i64) -> anyhow::Result<Vec<HistoryEntry>> {
+        let conversation = self.get_conversation(conversation_id).await?;
         let rows = sqlx::query(
-            "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY id ASC",
+            "SELECT role, content, sender_phone FROM messages WHERE conversation_id = ? ORDER BY id ASC",
         )
         .bind(conversation_id)
         .fetch_all(&self.pool)
         .await?;
+
+        if conversation.mode == ConversationMode::Exchange {
+            let participants = self
+                .find_participants_in_conversation(conversation_id)
+                .await?;
+            return rows
+                .into_iter()
+                .map(|row| {
+                    let content: String = row.get("content");
+                    let sender_phone: Option<String> = row.get("sender_phone");
+                    let sender_phone = sender_phone.unwrap_or_default();
+                    let sender_label = participants
+                        .iter()
+                        .find(|participant| participant.phone == sender_phone)
+                        .map(|participant| participant.phone.clone())
+                        .unwrap_or(sender_phone);
+                    Ok(HistoryEntry::Exchange {
+                        sender: sender_label,
+                        content,
+                    })
+                })
+                .collect();
+        }
 
         rows.into_iter()
             .map(|row| {
@@ -281,12 +350,38 @@ impl Db {
         role: MessageRole,
         content: &str,
     ) -> anyhow::Result<()> {
+        self.insert_message_from(conversation_id, role, content, None)
+            .await
+    }
+
+    pub async fn insert_exchange_message(
+        &self,
+        conversation_id: i64,
+        sender: &Participant,
+        content: &str,
+    ) -> anyhow::Result<()> {
+        let role = match sender.role {
+            ParticipantRole::Teacher => MessageRole::Teacher,
+            ParticipantRole::Learner => MessageRole::Learner,
+        };
+        self.insert_message_from(conversation_id, role, content, Some(&sender.phone))
+            .await
+    }
+
+    async fn insert_message_from(
+        &self,
+        conversation_id: i64,
+        role: MessageRole,
+        content: &str,
+        sender_phone: Option<&str>,
+    ) -> anyhow::Result<()> {
         sqlx::query(
-            "INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)",
+            "INSERT INTO messages (conversation_id, role, content, sender_phone) VALUES (?, ?, ?, ?)",
         )
         .bind(conversation_id)
         .bind(role.as_str())
         .bind(content)
+        .bind(sender_phone.map(normalize_phone))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -294,7 +389,7 @@ impl Db {
 
     pub async fn get_conversation(&self, conversation_id: i64) -> anyhow::Result<Conversation> {
         let row = sqlx::query(
-            "SELECT id, target_language, source_language FROM conversations WHERE id = ?",
+            "SELECT id, mode, target_language, source_language FROM conversations WHERE id = ?",
         )
         .bind(conversation_id)
         .fetch_one(&self.pool)
@@ -302,9 +397,20 @@ impl Db {
 
         Ok(Conversation {
             id: row.get("id"),
+            mode: ConversationMode::from_str(row.get::<String, _>("mode").as_str())?,
             target_language: row.get("target_language"),
             source_language: row.get("source_language"),
         })
+    }
+
+    pub async fn exchange_is_ready(&self, conversation_id: i64) -> anyhow::Result<bool> {
+        let participants = self
+            .find_participants_in_conversation(conversation_id)
+            .await?;
+        Ok(participants.len() >= 2
+            && participants
+                .iter()
+                .all(|participant| participant.learning_language.is_some()))
     }
 
     pub async fn resolve_participant_for_message(
@@ -422,8 +528,24 @@ impl Db {
                 None
             };
 
+            let partner_learning_language = if is_pending {
+                None
+            } else if let Some(ref partner_phone) = partner_phone {
+                self.find_participant_in_conversation(partner_phone, participant.conversation_id)
+                    .await?
+                    .and_then(|partner| partner.learning_language)
+            } else {
+                None
+            };
+
             let turn = if is_pending {
                 None
+            } else if conversation.mode == ConversationMode::Exchange {
+                if self.exchange_is_ready(participant.conversation_id).await? {
+                    Some(ConversationTurnStatus::YourTurnToSend)
+                } else {
+                    Some(ConversationTurnStatus::WaitingForMessage)
+                }
             } else {
                 Some(
                     self.turn_status_for_participant(&participant)
@@ -433,8 +555,11 @@ impl Db {
 
             listings.push(ConversationListing {
                 conversation_id: participant.conversation_id,
+                mode: conversation.mode,
                 target_language: conversation.target_language,
                 role: participant.role,
+                learning_language: participant.learning_language.clone(),
+                partner_learning_language,
                 partner_phone,
                 partner_display_name,
                 is_active: active_id == Some(participant.conversation_id),
@@ -485,70 +610,183 @@ impl Db {
         }
     }
 
-    pub async fn swap_roles_in_conversation(
+    pub async fn apply_conversation_mode(
         &self,
         conversation_id: i64,
         phone: &str,
+        setting: ConversationModeSetting,
     ) -> anyhow::Result<(Participant, Participant)> {
         let phone = normalize_phone(phone);
         if !self.conversation_has_both_participants(conversation_id).await? {
-            return Err(SwapRolesError::NotComplete.into());
+            return Err(SetModeError::NotComplete.into());
         }
 
+        let conversation = self.get_conversation(conversation_id).await?;
         let participants = self.find_participants_in_conversation(conversation_id).await?;
-        let partner = participants
-            .iter()
-            .find(|participant| participant.phone != phone)
-            .context("missing partner participant")
-            .map_err(|_| SwapRolesError::NotComplete)?;
         if participants
             .iter()
             .all(|participant| participant.phone != phone)
         {
-            return Err(SwapRolesError::NotParticipant.into());
+            return Err(SetModeError::NotParticipant.into());
         }
 
-        let learner = participants
-            .iter()
-            .find(|participant| participant.role == ParticipantRole::Learner)
-            .context("missing learner participant")
-            .map_err(|_| SwapRolesError::NotComplete)?;
-        let session = self.load_learner_session(learner.id).await?;
-        if session != LearnerSession::Idle {
-            return Err(SwapRolesError::ActiveExchange.into());
+        if conversation.mode == ConversationMode::Tutor {
+            if let Some(learner) = participants
+                .iter()
+                .find(|participant| participant.role == ParticipantRole::Learner)
+            {
+                let session = self.load_learner_session(learner.id).await?;
+                if session != LearnerSession::Idle {
+                    return Err(SetModeError::ActiveExchange.into());
+                }
+            }
         }
 
-        sqlx::query(
-            "UPDATE participants SET role = CASE
-                WHEN role = 'teacher' THEN 'learner'
-                WHEN role = 'learner' THEN 'teacher'
-             END
-             WHERE conversation_id = ?",
-        )
-        .bind(conversation_id)
-        .execute(&self.pool)
-        .await?;
+        match setting {
+            ConversationModeSetting::Exchange => {
+                if conversation.mode == ConversationMode::Exchange {
+                    let requester = self
+                        .find_participant_in_conversation(&phone, conversation_id)
+                        .await?
+                        .context("requester missing in exchange conversation")
+                        .map_err(|_| SetModeError::NotComplete)?;
+                    let partner = self
+                        .find_partner_participant(conversation_id, &phone)
+                        .await?
+                        .context("partner missing in exchange conversation")
+                        .map_err(|_| SetModeError::NotComplete)?;
+                    return Ok((requester, partner));
+                }
 
-        let updated_requester = self
+                for participant in &participants {
+                    if participant.role == ParticipantRole::Learner
+                        && participant.learning_language.is_none()
+                    {
+                        self.update_learning_language(
+                            conversation_id,
+                            &participant.phone,
+                            &conversation.target_language,
+                        )
+                        .await?;
+                    }
+                    if participant.role == ParticipantRole::Teacher
+                        && participant.learning_language.is_none()
+                    {
+                        self.update_learning_language(
+                            conversation_id,
+                            &participant.phone,
+                            &conversation.source_language,
+                        )
+                        .await?;
+                    }
+                }
+
+                sqlx::query("UPDATE conversations SET mode = 'exchange' WHERE id = ?")
+                    .bind(conversation_id)
+                    .execute(&self.pool)
+                    .await?;
+            }
+            ConversationModeSetting::Teacher | ConversationModeSetting::Learner => {
+                let desired_role = match setting {
+                    ConversationModeSetting::Teacher => ParticipantRole::Teacher,
+                    ConversationModeSetting::Learner => ParticipantRole::Learner,
+                    ConversationModeSetting::Exchange => unreachable!(),
+                };
+
+                if conversation.mode == ConversationMode::Exchange {
+                    let requester = participants
+                        .iter()
+                        .find(|participant| participant.phone == phone)
+                        .context("requester missing")
+                        .map_err(|_| SetModeError::NotComplete)?;
+                    let partner = participants
+                        .iter()
+                        .find(|participant| participant.phone != phone)
+                        .context("partner missing")
+                        .map_err(|_| SetModeError::NotComplete)?;
+
+                    let target_language = match desired_role {
+                        ParticipantRole::Learner => requester
+                            .learning_language
+                            .clone()
+                            .or_else(|| partner.learning_language.clone())
+                            .unwrap_or_else(|| conversation.target_language.clone()),
+                        ParticipantRole::Teacher => partner
+                            .learning_language
+                            .clone()
+                            .or_else(|| requester.learning_language.clone())
+                            .unwrap_or_else(|| conversation.target_language.clone()),
+                    };
+
+                    sqlx::query(
+                        "UPDATE conversations SET mode = 'tutor', target_language = ? WHERE id = ?",
+                    )
+                    .bind(&target_language)
+                    .bind(conversation_id)
+                    .execute(&self.pool)
+                    .await?;
+
+                    sqlx::query(
+                        "UPDATE participants SET role = ? WHERE conversation_id = ? AND phone = ?",
+                    )
+                    .bind(desired_role.as_str())
+                    .bind(conversation_id)
+                    .bind(&phone)
+                    .execute(&self.pool)
+                    .await?;
+                    sqlx::query(
+                        "UPDATE participants SET role = ? WHERE conversation_id = ? AND phone = ?",
+                    )
+                    .bind(desired_role.opposite().as_str())
+                    .bind(conversation_id)
+                    .bind(&partner.phone)
+                    .execute(&self.pool)
+                    .await?;
+                } else {
+                    let requester = participants
+                        .iter()
+                        .find(|participant| participant.phone == phone)
+                        .context("requester missing")
+                        .map_err(|_| SetModeError::NotComplete)?;
+                    if requester.role != desired_role {
+                        sqlx::query(
+                            "UPDATE participants SET role = CASE
+                                WHEN role = 'teacher' THEN 'learner'
+                                WHEN role = 'learner' THEN 'teacher'
+                             END
+                             WHERE conversation_id = ?",
+                        )
+                        .bind(conversation_id)
+                        .execute(&self.pool)
+                        .await?;
+                    }
+                }
+            }
+        }
+
+        let requester = self
             .find_participant_in_conversation(&phone, conversation_id)
             .await?
-            .context("requester missing after role swap")
-            .map_err(|_| SwapRolesError::NotComplete)?;
-        let updated_partner = self
-            .find_participant_in_conversation(&partner.phone, conversation_id)
+            .context("requester missing after mode change")
+            .map_err(|_| SetModeError::NotComplete)?;
+        let partner = self
+            .find_partner_participant(conversation_id, &phone)
             .await?
-            .context("partner missing after role swap")
-            .map_err(|_| SwapRolesError::NotComplete)?;
-        let new_learner = if updated_requester.role == ParticipantRole::Learner {
-            &updated_requester
-        } else {
-            &updated_partner
-        };
+            .context("partner missing after mode change")
+            .map_err(|_| SetModeError::NotComplete)?;
 
-        self.save_learner_session(new_learner.id, &LearnerSession::Idle)
-            .await?;
+        let final_conversation = self.get_conversation(conversation_id).await?;
+        if final_conversation.mode == ConversationMode::Tutor {
+            let learner = if requester.role == ParticipantRole::Learner {
+                &requester
+            } else {
+                &partner
+            };
+            self.save_learner_session(learner.id, &LearnerSession::Idle)
+                .await?;
+        }
 
-        Ok((updated_requester, updated_partner))
+        Ok((requester, partner))
     }
 
     pub async fn update_target_language(
@@ -572,6 +810,45 @@ impl Db {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    pub async fn update_learning_language(
+        &self,
+        conversation_id: i64,
+        phone: &str,
+        learning_language: &str,
+    ) -> anyhow::Result<()> {
+        let phone = normalize_phone(phone);
+        sqlx::query(
+            "UPDATE participants SET learning_language = ?
+             WHERE conversation_id = ? AND phone = ?",
+        )
+        .bind(learning_language)
+        .bind(conversation_id)
+        .bind(phone)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn find_partner_participant(
+        &self,
+        conversation_id: i64,
+        phone: &str,
+    ) -> anyhow::Result<Option<Participant>> {
+        let phone = normalize_phone(phone);
+        let row = sqlx::query(
+            "SELECT id, conversation_id, phone, role, learning_language
+             FROM participants
+             WHERE conversation_id = ? AND phone != ?
+             LIMIT 1",
+        )
+        .bind(conversation_id)
+        .bind(phone)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(participant_from_row))
     }
 
     pub async fn find_pending_invite_between(
@@ -663,7 +940,8 @@ impl Db {
         role: ParticipantRole,
     ) -> anyhow::Result<Option<Participant>> {
         let row = sqlx::query(
-            "SELECT id, conversation_id, phone, role FROM participants WHERE conversation_id = ? AND role = ?",
+            "SELECT id, conversation_id, phone, role, learning_language
+             FROM participants WHERE conversation_id = ? AND role = ?",
         )
         .bind(conversation_id)
         .bind(role.as_str())
@@ -691,14 +969,17 @@ impl Db {
         conversation_id: i64,
         phone: &str,
         role: ParticipantRole,
+        learning_language: Option<&str>,
     ) -> anyhow::Result<Participant> {
         let phone = normalize_phone(phone);
         let result = sqlx::query(
-            "INSERT INTO participants (conversation_id, phone, role) VALUES (?, ?, ?)",
+            "INSERT INTO participants (conversation_id, phone, role, learning_language)
+             VALUES (?, ?, ?, ?)",
         )
         .bind(conversation_id)
         .bind(&phone)
         .bind(role.as_str())
+        .bind(learning_language)
         .execute(&self.pool)
         .await?;
 
@@ -709,6 +990,7 @@ impl Db {
             conversation_id,
             phone,
             role,
+            learning_language: learning_language.map(ToString::to_string),
         })
     }
 
@@ -1021,7 +1303,8 @@ impl Db {
         conversation_id: i64,
     ) -> anyhow::Result<Vec<Participant>> {
         let rows = sqlx::query(
-            "SELECT id, conversation_id, phone, role FROM participants WHERE conversation_id = ?",
+            "SELECT id, conversation_id, phone, role, learning_language
+             FROM participants WHERE conversation_id = ?",
         )
         .bind(conversation_id)
         .fetch_all(&self.pool)
@@ -1036,7 +1319,7 @@ impl Db {
         conversation_id: i64,
     ) -> anyhow::Result<Option<Participant>> {
         let row = sqlx::query(
-            "SELECT id, conversation_id, phone, role
+            "SELECT id, conversation_id, phone, role, learning_language
              FROM participants WHERE phone = ? AND conversation_id = ?",
         )
         .bind(phone)
@@ -1052,7 +1335,8 @@ impl Db {
         phone: &str,
     ) -> anyhow::Result<Vec<Participant>> {
         let rows = sqlx::query(
-            "SELECT id, conversation_id, phone, role FROM participants WHERE phone = ?",
+            "SELECT id, conversation_id, phone, role, learning_language
+             FROM participants WHERE phone = ?",
         )
         .bind(phone)
         .fetch_all(&self.pool)
@@ -1068,6 +1352,7 @@ fn participant_from_row(row: sqlx::sqlite::SqliteRow) -> Participant {
         conversation_id: row.get("conversation_id"),
         phone: row.get("phone"),
         role: ParticipantRole::from_str(row.get::<String, _>("role").as_str()).unwrap(),
+        learning_language: row.get("learning_language"),
     }
 }
 

@@ -2,7 +2,7 @@ use std::io::{self, Write};
 
 use anyhow::Context;
 
-use crate::db::{Db, MessageRole};
+use crate::db::{ConversationMode, Db, MessageRole};
 use crate::flow::{self, LearnerSession};
 use crate::llm::Llm;
 
@@ -15,7 +15,7 @@ pub async fn run() -> anyhow::Result<()> {
     let source_language = std::env::var("MOLVAKT_SOURCE_LANGUAGE")
         .unwrap_or_else(|_| "English".into());
     let conversation = db
-        .create_conversation(&target_language, &source_language)
+        .create_conversation(ConversationMode::Tutor, &target_language, &source_language)
         .await?;
     let llm = Llm::from_env(&conversation).context("failed to initialize OpenAI client")?;
     let history = db.load_history(conversation.id).await?;

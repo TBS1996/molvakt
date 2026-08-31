@@ -1,4 +1,4 @@
-use crate::db::{Db, SwapRolesError};
+use crate::db::{ConversationMode, ConversationModeSetting, Db, SetModeError};
 use crate::phone::{contact_label, looks_like_phone, normalize_phone, phones_match};
 use crate::whatsapp::WhatsApp;
 
@@ -44,9 +44,23 @@ fn format_listing_line(
         .as_ref()
         .is_some_and(|partner| phones_match(partner, viewer_phone));
 
-    let role_desc = match listing.role {
-        crate::db::ParticipantRole::Teacher => format!("You teach {language}"),
-        crate::db::ParticipantRole::Learner => format!("You learn {language}"),
+    let role_desc = if listing.mode == ConversationMode::Exchange {
+        let your_language = listing
+            .learning_language
+            .as_deref()
+            .map(format_language_name)
+            .unwrap_or_else(|| "unknown".into());
+        let partner_language = listing
+            .partner_learning_language
+            .as_deref()
+            .map(format_language_name)
+            .unwrap_or_else(|| "?".into());
+        format!("Exchange — you learn {your_language}, partner learns {partner_language}")
+    } else {
+        match listing.role {
+            crate::db::ParticipantRole::Teacher => format!("You teach {language}"),
+            crate::db::ParticipantRole::Learner => format!("You learn {language}"),
+        }
     };
 
     let status = format_listing_status(listing);
@@ -95,7 +109,7 @@ pub async fn handle_list(db: &Db, whatsapp: &WhatsApp, phone: &str) -> anyhow::R
 
     lines.push(String::new());
     lines.push("Reply SWITCH <number> to change conversation.".into());
-    lines.push("Reply SWAP <number> to swap teacher/learner roles.".into());
+    lines.push("Reply SET MODE <number> teacher|learner|exchange to change mode.".into());
     lines.push("Reply CANCEL <number> to remove a pending invite.".into());
     lines.push("Reply SET LANGUAGE <name> to fix the language on the active conversation.".into());
     lines.push("Reply SET <number> <language> to fix a specific one.".into());
@@ -160,9 +174,18 @@ pub async fn handle_switch(
         .as_deref()
         .map(|phone| contact_label(phone, listing.partner_display_name.as_deref()))
         .unwrap_or_else(|| "your partner".into());
-    let role_desc = match listing.role {
-        crate::db::ParticipantRole::Teacher => format!("You teach {language}"),
-        crate::db::ParticipantRole::Learner => format!("You learn {language}"),
+    let role_desc = if listing.mode == ConversationMode::Exchange {
+        let your_language = listing
+            .learning_language
+            .as_deref()
+            .map(format_language_name)
+            .unwrap_or_else(|| "unknown".into());
+        format!("Exchange — you learn {your_language}")
+    } else {
+        match listing.role {
+            crate::db::ParticipantRole::Teacher => format!("You teach {language}"),
+            crate::db::ParticipantRole::Learner => format!("You learn {language}"),
+        }
     };
 
     whatsapp
@@ -174,21 +197,42 @@ pub async fn handle_switch(
     Ok(())
 }
 
-pub async fn handle_swap_roles(
+pub struct SetModeCommand {
+    pub index: Option<usize>,
+    pub mode: ConversationModeSetting,
+}
+
+pub async fn handle_set_mode(
     db: &Db,
     whatsapp: &WhatsApp,
     phone: &str,
-    selection: usize,
+    command: SetModeCommand,
 ) -> anyhow::Result<()> {
     let listings = db.list_conversations_for_phone(phone).await?;
-    let Some(listing) = listings.get(selection.saturating_sub(1)) else {
+    let listing = if let Some(index) = command.index {
+        let Some(listing) = listings.get(index.saturating_sub(1)) else {
+            whatsapp
+                .send_text(
+                    phone,
+                    &format!(
+                        "Invalid selection. Reply LIST to see your {} conversation(s).",
+                        listings.len()
+                    ),
+                )
+                .await?;
+            return Ok(());
+        };
+        listing
+    } else if let Some(listing) = listings.iter().find(|listing| listing.is_active) {
+        listing
+    } else if listings.len() == 1 {
+        &listings[0]
+    } else {
         whatsapp
             .send_text(
                 phone,
-                &format!(
-                    "Invalid selection. Reply LIST to see your {} conversation(s).",
-                    listings.len()
-                ),
+                "You have multiple conversations. Use SET MODE <number> <mode>, e.g. SET MODE 1 exchange.\n\
+                 Reply LIST to see the numbers.",
             )
             .await?;
         return Ok(());
@@ -221,50 +265,86 @@ pub async fn handle_swap_roles(
     }
 
     match db
-        .swap_roles_in_conversation(listing.conversation_id, phone)
+        .apply_conversation_mode(listing.conversation_id, phone, command.mode)
         .await
     {
         Ok((you, partner)) => {
-            let language = format_language_name(&listing.target_language);
             let partner_name = db.get_display_name(&partner.phone).await?;
             let your_name = db.get_display_name(phone).await?;
+            let partner_label = contact_label(&partner.phone, partner_name.as_deref());
+            let your_label = contact_label(phone, your_name.as_deref());
 
+            match command.mode {
+                ConversationModeSetting::Exchange => {
+                    let your_language = you
+                        .learning_language
+                        .as_deref()
+                        .map(format_language_name)
+                        .unwrap_or_else(|| "not set".into());
+                    let partner_language = partner
+                        .learning_language
+                        .as_deref()
+                        .map(format_language_name)
+                        .unwrap_or_else(|| "not set".into());
+
+                    whatsapp
+                        .send_text(
+                            phone,
+                            &format!(
+                                "Switched to exchange mode with {partner_label}. \
+                                 You learn {your_language} — write in that language."
+                            ),
+                        )
+                        .await?;
+
+                    whatsapp
+                        .send_text(
+                            &partner.phone,
+                            &format!(
+                                "{your_label} switched this chat to exchange mode. \
+                                 You learn {partner_language} — write in that language."
+                            ),
+                        )
+                        .await?;
+                }
+                ConversationModeSetting::Teacher | ConversationModeSetting::Learner => {
+                    let conversation = db.get_conversation(listing.conversation_id).await?;
+                    let language = format_language_name(&conversation.target_language);
+                    whatsapp
+                        .send_text(
+                            phone,
+                            &format!(
+                                "You are now the {} for {language} with {partner_label}.",
+                                you.role.label(),
+                            ),
+                        )
+                        .await?;
+                    whatsapp
+                        .send_text(
+                            &partner.phone,
+                            &format!(
+                                "{your_label} switched mode. You are now the {} for {language}.",
+                                partner.role.label(),
+                            ),
+                        )
+                        .await?;
+                }
+            }
+        }
+        Err(error) if error.downcast_ref::<SetModeError>() == Some(&SetModeError::ActiveExchange) => {
             whatsapp
                 .send_text(
                     phone,
-                    &format!(
-                        "Roles swapped with {}. You are now the {} for {language}.",
-                        contact_label(&partner.phone, partner_name.as_deref()),
-                        you.role.label(),
-                    ),
-                )
-                .await?;
-
-            whatsapp
-                .send_text(
-                    &partner.phone,
-                    &format!(
-                        "{} swapped roles. You are now the {} for {language}.",
-                        contact_label(phone, your_name.as_deref()),
-                        partner.role.label(),
-                    ),
+                    "Can't change mode while a message is in progress. Wait until the learner finishes their current reply.",
                 )
                 .await?;
         }
-        Err(error) if error.downcast_ref::<SwapRolesError>() == Some(&SwapRolesError::ActiveExchange) => {
+        Err(error) if error.downcast_ref::<SetModeError>() == Some(&SetModeError::NotComplete) => {
             whatsapp
-                .send_text(
-                    phone,
-                    "Can't swap roles while a message is in progress. Wait until the learner finishes their current reply.",
-                )
+                .send_text(phone, "That conversation isn't ready for a mode change yet.")
                 .await?;
         }
-        Err(error) if error.downcast_ref::<SwapRolesError>() == Some(&SwapRolesError::NotComplete) => {
-            whatsapp
-                .send_text(phone, "That conversation isn't ready for a role swap yet.")
-                .await?;
-        }
-        Err(error) if error.downcast_ref::<SwapRolesError>() == Some(&SwapRolesError::NotParticipant) => {
+        Err(error) if error.downcast_ref::<SetModeError>() == Some(&SetModeError::NotParticipant) => {
             whatsapp
                 .send_text(phone, "You aren't part of that conversation.")
                 .await?;
@@ -345,7 +425,7 @@ pub async fn handle_set_language(
         return Ok(());
     }
 
-    let conversation_id = if let Some(index) = command.index {
+    let (conversation_id, is_exchange) = if let Some(index) = command.index {
         let Some(listing) = listings.get(index.saturating_sub(1)) else {
             whatsapp
                 .send_text(
@@ -358,11 +438,11 @@ pub async fn handle_set_language(
                 .await?;
             return Ok(());
         };
-        listing.conversation_id
+        (listing.conversation_id, listing.mode == ConversationMode::Exchange)
     } else if let Some(listing) = listings.iter().find(|listing| listing.is_active) {
-        listing.conversation_id
+        (listing.conversation_id, listing.mode == ConversationMode::Exchange)
     } else if listings.len() == 1 {
-        listings[0].conversation_id
+        (listings[0].conversation_id, listings[0].mode == ConversationMode::Exchange)
     } else {
         whatsapp
             .send_text(
@@ -374,8 +454,13 @@ pub async fn handle_set_language(
         return Ok(());
     };
 
-    db.update_target_language(conversation_id, phone, &command.language)
-        .await?;
+    if is_exchange {
+        db.update_learning_language(conversation_id, phone, &command.language)
+            .await?;
+    } else {
+        db.update_target_language(conversation_id, phone, &command.language)
+            .await?;
+    }
 
     whatsapp
         .send_text(
@@ -393,7 +478,7 @@ pub async fn handle_help(whatsapp: &WhatsApp, phone: &str) -> anyhow::Result<()>
             "molvakt commands:\n\n\
              LIST — show your conversations\n\
              SWITCH <number> — change active conversation\n\
-             SWAP <number> — swap teacher/learner roles\n\
+             SET MODE <number> teacher|learner|exchange — change conversation mode\n\
              CANCEL <number> — cancel a pending invite\n\
              SET LANGUAGE <name> — fix language on active conversation\n\
              SET <number> <language> — fix language on a specific one\n\
@@ -408,6 +493,9 @@ pub async fn handle_help(whatsapp: &WhatsApp, phone: &str) -> anyhow::Result<()>
 pub fn parse_set_language(text: &str) -> Option<SetLanguageCommand> {
     let words: Vec<&str> = text.split_whitespace().collect();
     if words.len() < 2 || !words[0].eq_ignore_ascii_case("SET") {
+        return None;
+    }
+    if words.len() >= 2 && words[1].eq_ignore_ascii_case("MODE") {
         return None;
     }
 
@@ -429,12 +517,31 @@ pub fn parse_set_language(text: &str) -> Option<SetLanguageCommand> {
     })
 }
 
-pub fn parse_switch_selection(text: &str) -> Option<usize> {
-    parse_numbered_command(text, "SWITCH")
+pub fn parse_set_mode(text: &str) -> Option<SetModeCommand> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.len() < 3 || !words[0].eq_ignore_ascii_case("SET") || !words[1].eq_ignore_ascii_case("MODE")
+    {
+        return None;
+    }
+
+    let (index, mode_index) = if let Ok(index) = words[2].parse::<usize>() {
+        (Some(index), 3)
+    } else {
+        (None, 2)
+    };
+
+    let mode = match words.get(mode_index)?.to_ascii_lowercase().as_str() {
+        "teacher" => ConversationModeSetting::Teacher,
+        "learner" => ConversationModeSetting::Learner,
+        "exchange" => ConversationModeSetting::Exchange,
+        _ => return None,
+    };
+
+    Some(SetModeCommand { index, mode })
 }
 
-pub fn parse_swap_selection(text: &str) -> Option<usize> {
-    parse_numbered_command(text, "SWAP")
+pub fn parse_switch_selection(text: &str) -> Option<usize> {
+    parse_numbered_command(text, "SWITCH")
 }
 
 pub fn parse_cancel_selection(text: &str) -> Option<usize> {

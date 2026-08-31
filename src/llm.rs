@@ -39,6 +39,22 @@ impl Llm {
         })
     }
 
+    pub fn for_exchange(
+        learning_language: &str,
+        partner_learning_language: &str,
+    ) -> Result<Self> {
+        let api_key =
+            std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY must be set")?;
+        let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into());
+
+        Ok(Self {
+            client: Client::with_config(OpenAIConfig::new().with_api_key(api_key)),
+            model,
+            target_language: learning_language.to_string(),
+            source_language: partner_learning_language.to_string(),
+        })
+    }
+
     pub fn source_language(&self) -> &str {
         &self.source_language
     }
@@ -256,6 +272,7 @@ pub fn format_history(history: &[HistoryEntry]) -> String {
         .map(|entry| match entry {
             HistoryEntry::Teacher(message) => format!("Teacher: {message}"),
             HistoryEntry::Learner(message) => format!("Learner: {message}"),
+            HistoryEntry::Exchange { sender, content } => format!("{sender}: {content}"),
         })
         .collect::<Vec<_>>()
         .join("\n")
