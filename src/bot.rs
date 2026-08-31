@@ -313,6 +313,17 @@ impl Bot {
                 if let Some(summary) = turn.teacher_message {
                     self.whatsapp.send_text(&teacher.phone, &summary).await?;
                 }
+
+                let teacher_name = self.db.get_display_name(&teacher.phone).await?;
+                self.whatsapp
+                    .send_text(
+                        &learner.phone,
+                        &format!(
+                            "Message sent to {} (teacher).",
+                            contact_label(&teacher.phone, teacher_name.as_deref())
+                        ),
+                    )
+                    .await?;
             }
         }
 
