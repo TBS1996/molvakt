@@ -41,7 +41,7 @@ pub struct WebhookValue {
 #[derive(Debug, Deserialize)]
 pub struct WebhookContact {
     pub wa_id: String,
-    pub profile: WebhookProfile,
+    pub profile: Option<WebhookProfile>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,7 +108,8 @@ impl WhatsApp {
                             .find(|contact| {
                                 normalize_phone(&contact.wa_id) == normalize_phone(&message.from)
                             })
-                            .map(|contact| contact.profile.name.clone());
+                            .and_then(|contact| contact.profile.as_ref())
+                            .map(|profile| profile.name.clone());
                         messages.push(ParsedIncomingMessage {
                             from: message.from,
                             text,
