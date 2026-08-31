@@ -54,6 +54,16 @@ pub fn listing_awaits_user_reply(listing: &ConversationListing, viewer_phone: &s
     }
 }
 
+pub fn listing_should_show_partner_last_message(listing: &ConversationListing) -> bool {
+    match listing.turn {
+        Some(crate::db::ConversationTurnStatus::YourTurnToReply) => true,
+        Some(crate::db::ConversationTurnStatus::YourTurnToSend) => {
+            listing.mode == ConversationMode::ExchangeTurns
+        }
+        _ => false,
+    }
+}
+
 pub fn format_listing_status_text(listing: &ConversationListing) -> String {
     if listing.is_pending {
         "waiting for partner".to_string()
@@ -288,14 +298,39 @@ pub async fn handle_switch(
     let role_desc = format_listing_role_desc(listing);
     let partner = format_listing_partner(listing);
     let status = format_listing_status_text(listing);
-    let message = if status.is_empty() {
+    let mut message = if status.is_empty() {
         format!("Switched to {role_desc} — partner: {partner}.")
     } else {
         format!("Switched to {role_desc} — partner: {partner} ({status}).")
     };
 
+    if listing_should_show_partner_last_message(listing) {
+        if let Some(last_message) = db
+            .last_partner_message(
+                listing.conversation_id,
+                listing.mode,
+                phone,
+                listing.role,
+            )
+            .await?
+        {
+            message.push_str(&format!(
+                "\n\nLast from {partner}:\n{}",
+                truncate_for_display(&last_message, 400)
+            ));
+        }
+    }
+
     whatsapp.send_text(phone, &message).await?;
     Ok(())
+}
+
+fn truncate_for_display(text: &str, max_len: usize) -> String {
+    if text.chars().count() <= max_len {
+        return text.to_string();
+    }
+    let truncated: String = text.chars().take(max_len).collect();
+    format!("{truncated}…")
 }
 
 pub struct SetModeCommand {

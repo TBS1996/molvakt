@@ -462,6 +462,42 @@ impl Db {
             .collect()
     }
 
+    pub async fn last_partner_message(
+        &self,
+        conversation_id: i64,
+        mode: ConversationMode,
+        viewer_phone: &str,
+        viewer_role: ParticipantRole,
+    ) -> anyhow::Result<Option<String>> {
+        let viewer_phone = normalize_phone(viewer_phone);
+        let content: Option<String> = if mode.is_exchange() {
+            sqlx::query_scalar(
+                "SELECT content FROM messages
+                 WHERE conversation_id = ? AND sender_phone IS NOT NULL AND sender_phone != ?
+                 ORDER BY id DESC LIMIT 1",
+            )
+            .bind(conversation_id)
+            .bind(&viewer_phone)
+            .fetch_optional(&self.pool)
+            .await?
+        } else {
+            let partner_role = match viewer_role {
+                ParticipantRole::Learner => "teacher",
+                ParticipantRole::Teacher => "learner",
+            };
+            sqlx::query_scalar(
+                "SELECT content FROM messages
+                 WHERE conversation_id = ? AND role = ?
+                 ORDER BY id DESC LIMIT 1",
+            )
+            .bind(conversation_id)
+            .bind(partner_role)
+            .fetch_optional(&self.pool)
+            .await?
+        };
+        Ok(content)
+    }
+
     pub async fn insert_message(
         &self,
         conversation_id: i64,
