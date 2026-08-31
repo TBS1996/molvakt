@@ -123,6 +123,48 @@ impl WhatsApp {
         Ok(messages)
     }
 
+    pub async fn send_list_menu(
+        &self,
+        to: &str,
+        body: &str,
+        button_label: &str,
+        section_title: &str,
+        rows: &[(&str, &str, &str)],
+    ) -> anyhow::Result<()> {
+        let to = normalize_phone(to);
+        let list_rows: Vec<_> = rows
+            .iter()
+            .map(|(id, title, description)| {
+                serde_json::json!({
+                    "id": id,
+                    "title": title,
+                    "description": description,
+                })
+            })
+            .collect();
+
+        self.send_interactive(
+            &to,
+            serde_json::json!({
+                "type": "interactive",
+                "interactive": {
+                    "type": "list",
+                    "body": {
+                        "text": body
+                    },
+                    "action": {
+                        "button": button_label,
+                        "sections": [{
+                            "title": section_title,
+                            "rows": list_rows
+                        }]
+                    }
+                }
+            }),
+        )
+        .await
+    }
+
     pub async fn send_review_choice_list(
         &self,
         to: &str,

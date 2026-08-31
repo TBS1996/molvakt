@@ -7,8 +7,8 @@ use crate::conversations::{
     StartConversationCommand,
 };
 use crate::db::{
-    Conversation, ConversationMode, Db, MessageRole, Participant, ParticipantResolve,
-    ParticipantRole,
+    Conversation, ConversationMode, Db, MessageRole, OnboardingData, OnboardingStep,
+    Participant, ParticipantResolve, ParticipantRole,
 };
 use crate::flow::{self, LearnerSession};
 use crate::llm::Llm;
@@ -152,11 +152,9 @@ impl Bot {
             }
             ParticipantResolve::StaleIncomplete { conversation_id } => {
                 self.db.delete_conversation(conversation_id).await?;
-                self.whatsapp
-                    .send_text(
-                        phone,
-                        "That conversation is no longer active. Reply LEARNER, TEACHER, EXCHANGE, or EXCHANGE-TURNS to start a new one.",
-                    )
+                onboarding::send_welcome_menu(&self.whatsapp, phone).await?;
+                self.db
+                    .save_onboarding_session(phone, OnboardingStep::Welcome, &OnboardingData::default())
                     .await?;
                 Ok(())
             }

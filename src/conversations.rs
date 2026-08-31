@@ -109,7 +109,8 @@ pub async fn handle_list(db: &Db, whatsapp: &WhatsApp, phone: &str) -> anyhow::R
             .send_text(
                 phone,
                 "You don't have any conversations yet.\n\n\
-                 Reply LEARNER, TEACHER, EXCHANGE, or EXCHANGE-TURNS to start one.",
+                 Reply LEARNER, TEACHER, EXCHANGE, or EXCHANGE-TURNS to start one.\n\
+                 (Or open the menu if you haven't set up yet.)",
             )
             .await?;
         return Ok(());
@@ -544,10 +545,8 @@ pub async fn handle_help(whatsapp: &WhatsApp, phone: &str) -> anyhow::Result<()>
              CANCEL <number> — cancel a pending invite\n\
              SET LANGUAGE <name> — fix language on active conversation\n\
              SET <number> <language> — fix language on a specific one\n\
-             LEARNER — tutor mode, you practice a language\n\
-             TEACHER — tutor mode, you teach your language\n\
-             EXCHANGE — language exchange (write anytime in your language)\n\
-             EXCHANGE-TURNS — language exchange (take turns, one message each)\n\n\
+             LEARNER / TEACHER / EXCHANGE / EXCHANGE-TURNS — start a new conversation\n\
+             (New users: message the bot to open the setup menu)\n\n\
              In an active conversation, just message normally.",
         )
         .await?;
