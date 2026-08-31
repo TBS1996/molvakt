@@ -17,11 +17,10 @@ pub async fn extract_from_message(
     user_phone: &str,
     message: &str,
     learning_language: &str,
-    source_language: &str,
     partner_phone: &str,
     conversation_id: i64,
 ) -> anyhow::Result<()> {
-    let llm = Llm::for_exchange(learning_language, source_language)?;
+    let llm = Llm::for_vocabulary(learning_language)?;
     let items = llm.extract_vocabulary(message).await?;
     if items.is_empty() {
         return Ok(());
@@ -56,7 +55,6 @@ pub fn spawn_extract_from_message(
     user_phone: String,
     message: String,
     learning_language: String,
-    source_language: String,
     partner_phone: String,
     conversation_id: i64,
 ) {
@@ -66,7 +64,6 @@ pub fn spawn_extract_from_message(
             &user_phone,
             &message,
             &learning_language,
-            &source_language,
             &partner_phone,
             conversation_id,
         )

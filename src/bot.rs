@@ -284,7 +284,6 @@ impl Bot {
             &learner.phone,
             text,
             &conversation.target_language,
-            &conversation.source_language,
             &teacher.phone,
             conversation.id,
         );
@@ -350,7 +349,6 @@ impl Bot {
                     &learner.phone,
                     &learner_reply,
                     &conversation.target_language,
-                    &conversation.source_language,
                     &teacher.phone,
                     conversation.id,
                 );
@@ -429,7 +427,6 @@ impl Bot {
             &sender.phone,
             text,
             learning_language,
-            partner_learning_language,
             &partner.phone,
             conversation.id,
         );
@@ -565,7 +562,6 @@ impl Bot {
             &sender.phone,
             text,
             active_language,
-            &other_language,
             &partner.phone,
             conversation.id,
         );
@@ -578,7 +574,6 @@ impl Bot {
         user_phone: &str,
         message: &str,
         learning_language: &str,
-        source_language: &str,
         partner_phone: &str,
         conversation_id: i64,
     ) {
@@ -587,7 +582,6 @@ impl Bot {
             user_phone.to_string(),
             message.to_string(),
             learning_language.to_string(),
-            source_language.to_string(),
             partner_phone.to_string(),
             conversation_id,
         );

@@ -72,6 +72,10 @@ impl Llm {
         })
     }
 
+    pub fn for_vocabulary(learning_language: &str) -> Result<Self> {
+        Self::for_exchange(learning_language, "English")
+    }
+
     pub fn source_language(&self) -> &str {
         &self.source_language
     }
@@ -221,17 +225,17 @@ impl Llm {
     pub async fn extract_vocabulary(&self, message: &str) -> Result<Vec<(String, String)>> {
         let system = format!(
             "You extract vocabulary for flashcards from a {target} message. \
-             The student is a {source} speaker learning {target}. \
+             The student is learning {target}. \
              Pick useful individual words and short phrases (up to ~5 words) — \
              common collocations, idioms, or expressions worth memorizing. \
              Do NOT include the full sentence unless it is a well-known fixed phrase \
              (e.g. a greeting or proverb). Skip names, filler, and words that are \
              obvious cognates with no learning value. \
              Return JSON only: {{\"items\": [{{\"term\": \"...\", \"translation\": \"...\"}}]}}. \
-             Each term must be in {target}; each translation in {source}. \
+             Each term must be in {target}. Each translation must be in English only — \
+             never translate into any other language. \
              If nothing is worth adding, return {{\"items\": []}}.",
             target = self.target_language,
-            source = self.source_language,
         );
 
         let user = format!("Message in {target}:\n{message}", target = self.target_language);
