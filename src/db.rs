@@ -58,6 +58,27 @@ impl ConversationTurnStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwapRolesError {
+    NotParticipant,
+    NotComplete,
+    ActiveExchange,
+}
+
+impl std::fmt::Display for SwapRolesError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotParticipant => write!(f, "not a participant in this conversation"),
+            Self::NotComplete => write!(f, "conversation is not ready for role swap"),
+            Self::ActiveExchange => {
+                write!(f, "learner is mid-exchange; wait until the current message is finished")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SwapRolesError {}
+
 pub enum ParticipantResolve {
     Ready(Participant),
     WaitingInvite {
@@ -139,6 +160,10 @@ impl ParticipantRole {
             ParticipantRole::Teacher => "teacher",
             ParticipantRole::Learner => "learner",
         }
+    }
+
+    pub fn label(self) -> &'static str {
+        self.as_str()
     }
 
     pub fn from_str(role: &str) -> anyhow::Result<Self> {
@@ -458,6 +483,72 @@ impl Db {
                 }
             }
         }
+    }
+
+    pub async fn swap_roles_in_conversation(
+        &self,
+        conversation_id: i64,
+        phone: &str,
+    ) -> anyhow::Result<(Participant, Participant)> {
+        let phone = normalize_phone(phone);
+        if !self.conversation_has_both_participants(conversation_id).await? {
+            return Err(SwapRolesError::NotComplete.into());
+        }
+
+        let participants = self.find_participants_in_conversation(conversation_id).await?;
+        let partner = participants
+            .iter()
+            .find(|participant| participant.phone != phone)
+            .context("missing partner participant")
+            .map_err(|_| SwapRolesError::NotComplete)?;
+        if participants
+            .iter()
+            .all(|participant| participant.phone != phone)
+        {
+            return Err(SwapRolesError::NotParticipant.into());
+        }
+
+        let learner = participants
+            .iter()
+            .find(|participant| participant.role == ParticipantRole::Learner)
+            .context("missing learner participant")
+            .map_err(|_| SwapRolesError::NotComplete)?;
+        let session = self.load_learner_session(learner.id).await?;
+        if session != LearnerSession::Idle {
+            return Err(SwapRolesError::ActiveExchange.into());
+        }
+
+        sqlx::query(
+            "UPDATE participants SET role = CASE
+                WHEN role = 'teacher' THEN 'learner'
+                WHEN role = 'learner' THEN 'teacher'
+             END
+             WHERE conversation_id = ?",
+        )
+        .bind(conversation_id)
+        .execute(&self.pool)
+        .await?;
+
+        let updated_requester = self
+            .find_participant_in_conversation(&phone, conversation_id)
+            .await?
+            .context("requester missing after role swap")
+            .map_err(|_| SwapRolesError::NotComplete)?;
+        let updated_partner = self
+            .find_participant_in_conversation(&partner.phone, conversation_id)
+            .await?
+            .context("partner missing after role swap")
+            .map_err(|_| SwapRolesError::NotComplete)?;
+        let new_learner = if updated_requester.role == ParticipantRole::Learner {
+            &updated_requester
+        } else {
+            &updated_partner
+        };
+
+        self.save_learner_session(new_learner.id, &LearnerSession::Idle)
+            .await?;
+
+        Ok((updated_requester, updated_partner))
     }
 
     pub async fn update_target_language(
@@ -923,6 +1014,20 @@ impl Db {
         .await?;
 
         Ok(row.and_then(|row| row.get::<Option<i64>, _>("active_conversation_id")))
+    }
+
+    async fn find_participants_in_conversation(
+        &self,
+        conversation_id: i64,
+    ) -> anyhow::Result<Vec<Participant>> {
+        let rows = sqlx::query(
+            "SELECT id, conversation_id, phone, role FROM participants WHERE conversation_id = ?",
+        )
+        .bind(conversation_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(participant_from_row).collect())
     }
 
     async fn find_participant_in_conversation(

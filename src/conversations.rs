@@ -1,4 +1,4 @@
-use crate::db::Db;
+use crate::db::{Db, SwapRolesError};
 use crate::phone::{contact_label, looks_like_phone, normalize_phone, phones_match};
 use crate::whatsapp::WhatsApp;
 
@@ -95,6 +95,7 @@ pub async fn handle_list(db: &Db, whatsapp: &WhatsApp, phone: &str) -> anyhow::R
 
     lines.push(String::new());
     lines.push("Reply SWITCH <number> to change conversation.".into());
+    lines.push("Reply SWAP <number> to swap teacher/learner roles.".into());
     lines.push("Reply CANCEL <number> to remove a pending invite.".into());
     lines.push("Reply SET LANGUAGE <name> to fix the language on the active conversation.".into());
     lines.push("Reply SET <number> <language> to fix a specific one.".into());
@@ -170,6 +171,107 @@ pub async fn handle_switch(
             &format!("Switched to {role_desc} — partner: {partner}."),
         )
         .await?;
+    Ok(())
+}
+
+pub async fn handle_swap_roles(
+    db: &Db,
+    whatsapp: &WhatsApp,
+    phone: &str,
+    selection: usize,
+) -> anyhow::Result<()> {
+    let listings = db.list_conversations_for_phone(phone).await?;
+    let Some(listing) = listings.get(selection.saturating_sub(1)) else {
+        whatsapp
+            .send_text(
+                phone,
+                &format!(
+                    "Invalid selection. Reply LIST to see your {} conversation(s).",
+                    listings.len()
+                ),
+            )
+            .await?;
+        return Ok(());
+    };
+
+    let viewer_phone = normalize_phone(phone);
+    let broken = listing
+        .partner_phone
+        .as_ref()
+        .is_some_and(|partner| phones_match(partner, &viewer_phone));
+
+    if broken {
+        whatsapp
+            .send_text(
+                phone,
+                "That conversation is invalid. Reply CANCEL to remove it.",
+            )
+            .await?;
+        return Ok(());
+    }
+
+    if listing.is_pending {
+        whatsapp
+            .send_text(
+                phone,
+                "That conversation is still waiting for your partner to accept the invite.",
+            )
+            .await?;
+        return Ok(());
+    }
+
+    match db
+        .swap_roles_in_conversation(listing.conversation_id, phone)
+        .await
+    {
+        Ok((you, partner)) => {
+            let language = format_language_name(&listing.target_language);
+            let partner_name = db.get_display_name(&partner.phone).await?;
+            let your_name = db.get_display_name(phone).await?;
+
+            whatsapp
+                .send_text(
+                    phone,
+                    &format!(
+                        "Roles swapped with {}. You are now the {} for {language}.",
+                        contact_label(&partner.phone, partner_name.as_deref()),
+                        you.role.label(),
+                    ),
+                )
+                .await?;
+
+            whatsapp
+                .send_text(
+                    &partner.phone,
+                    &format!(
+                        "{} swapped roles. You are now the {} for {language}.",
+                        contact_label(phone, your_name.as_deref()),
+                        partner.role.label(),
+                    ),
+                )
+                .await?;
+        }
+        Err(error) if error.downcast_ref::<SwapRolesError>() == Some(&SwapRolesError::ActiveExchange) => {
+            whatsapp
+                .send_text(
+                    phone,
+                    "Can't swap roles while a message is in progress. Wait until the learner finishes their current reply.",
+                )
+                .await?;
+        }
+        Err(error) if error.downcast_ref::<SwapRolesError>() == Some(&SwapRolesError::NotComplete) => {
+            whatsapp
+                .send_text(phone, "That conversation isn't ready for a role swap yet.")
+                .await?;
+        }
+        Err(error) if error.downcast_ref::<SwapRolesError>() == Some(&SwapRolesError::NotParticipant) => {
+            whatsapp
+                .send_text(phone, "You aren't part of that conversation.")
+                .await?;
+        }
+        Err(error) => return Err(error),
+    }
+
     Ok(())
 }
 
@@ -291,6 +393,7 @@ pub async fn handle_help(whatsapp: &WhatsApp, phone: &str) -> anyhow::Result<()>
             "molvakt commands:\n\n\
              LIST — show your conversations\n\
              SWITCH <number> — change active conversation\n\
+             SWAP <number> — swap teacher/learner roles\n\
              CANCEL <number> — cancel a pending invite\n\
              SET LANGUAGE <name> — fix language on active conversation\n\
              SET <number> <language> — fix language on a specific one\n\
@@ -328,6 +431,10 @@ pub fn parse_set_language(text: &str) -> Option<SetLanguageCommand> {
 
 pub fn parse_switch_selection(text: &str) -> Option<usize> {
     parse_numbered_command(text, "SWITCH")
+}
+
+pub fn parse_swap_selection(text: &str) -> Option<usize> {
+    parse_numbered_command(text, "SWAP")
 }
 
 pub fn parse_cancel_selection(text: &str) -> Option<usize> {
