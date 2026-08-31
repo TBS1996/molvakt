@@ -258,7 +258,7 @@ async fn continue_onboarding(
             }
 
             data.target_language = Some(target_language.to_string());
-            if data.source_language.is_none() {
+            if data.source_language.is_none() && !data.mode.is_some_and(|mode| mode.is_exchange()) {
                 data.source_language = Some(default_source_language());
             }
 
@@ -289,38 +289,64 @@ async fn continue_onboarding(
                 .context("missing conversation during exchange setup")?;
             db.update_learning_language(conversation_id, phone, learning_language)
                 .await?;
+            db.update_source_language(conversation_id, learning_language)
+                .await?;
             db.clear_onboarding_session(phone).await?;
 
             let conversation = db.get_conversation(conversation_id).await?;
-            let inviter_language = conversation.target_language.clone();
             let partner = db
                 .find_partner_participant(conversation_id, phone)
                 .await?
                 .context("missing exchange partner")?;
             let partner_name = db.get_display_name(&partner.phone).await?;
             let your_name = db.get_display_name(phone).await?;
+            let inviter_language = conversation.target_language.clone();
 
-            whatsapp
-                .send_text(
-                    phone,
-                    &format!(
-                        "You're connected! You learn {learning_language}, {} learns {inviter_language}.\n\n\
-                         Write messages in {learning_language} and molvakt will forward them.",
+            if conversation.mode == ConversationMode::ExchangeTurns {
+                db.init_exchange_round_state(
+                    conversation_id,
+                    &partner.phone,
+                    &inviter_language,
+                    true,
+                )
+                .await?;
+            }
+
+            db.set_active_conversation(phone, conversation_id).await?;
+            db.set_active_conversation(&partner.phone, conversation_id)
+                .await?;
+
+            let (invitee_message, inviter_message) = match conversation.mode {
+                ConversationMode::ExchangeTurns => (
+                    format!(
+                        "You're connected! You'll take turns writing in the same language — \
+                         first both write in {inviter_language}, then both write in {learning_language}.\n\n\
+                         {} goes first in {inviter_language}.",
                         contact_label(&partner.phone, partner_name.as_deref())
                     ),
-                )
-                .await?;
-
-            whatsapp
-                .send_text(
-                    &partner.phone,
-                    &format!(
-                        "{} joined the exchange! They learn {learning_language}, you learn {inviter_language}.\n\n\
-                         Write messages in {inviter_language} and molvakt will forward them.",
+                    format!(
+                        "You're connected to {}! You'll take turns writing in the same language — \
+                         first both write in {inviter_language}, then both write in {learning_language}.\n\n\
+                         You go first in {inviter_language}.",
                         contact_label(phone, your_name.as_deref())
                     ),
-                )
-                .await?;
+                ),
+                ConversationMode::Exchange => (
+                    format!(
+                        "You're connected! Exchange mode — you learn {learning_language}. \
+                         Always write in that language."
+                    ),
+                    format!(
+                        "{} joined the exchange! Exchange mode — you learn {inviter_language}. \
+                         Always write in that language.",
+                        contact_label(phone, your_name.as_deref())
+                    ),
+                ),
+                ConversationMode::Tutor => unreachable!(),
+            };
+
+            whatsapp.send_text(phone, &invitee_message).await?;
+            whatsapp.send_text(&partner.phone, &inviter_message).await?;
         }
     }
 
@@ -343,10 +369,15 @@ async fn send_invite(
         .target_language
         .as_ref()
         .context("missing target language during invite")?;
-    let source_language = data
-        .source_language
-        .clone()
-        .unwrap_or_else(default_source_language);
+    let source_language = if mode.is_exchange() {
+        data.source_language
+            .clone()
+            .unwrap_or_else(|| "pending".into())
+    } else {
+        data.source_language
+            .clone()
+            .unwrap_or_else(default_source_language)
+    };
 
     if phones_match(phone, partner_phone) {
         whatsapp
@@ -554,74 +585,39 @@ async fn accept_exchange_invite(
     whatsapp: &WhatsApp,
     phone: &str,
     invite: ConversationInvite,
-    conversation: &crate::db::Conversation,
+    _conversation: &crate::db::Conversation,
 ) -> anyhow::Result<()> {
     let invitee_role = invite.inviter_role.opposite();
-    db.register_participant(
-        invite.conversation_id,
-        phone,
-        invitee_role,
-        Some(&conversation.source_language),
-    )
-    .await?;
+    db.register_participant(invite.conversation_id, phone, invitee_role, None)
+        .await?;
 
     db.update_invite_status(invite.id, crate::db::InviteStatus::Accepted)
         .await?;
-    db.set_active_conversation(phone, invite.conversation_id).await?;
-    db.set_active_conversation(&invite.inviter_phone, invite.conversation_id)
+
+    db.save_onboarding_session(
+        phone,
+        OnboardingStep::EnterExchangeLearningLanguage,
+        &OnboardingData {
+            pending_conversation_id: Some(invite.conversation_id),
+            ..OnboardingData::default()
+        },
+    )
+    .await?;
+
+    whatsapp
+        .send_text(phone, "What language do you want to learn? (e.g. Norwegian)")
         .await?;
 
-    if conversation.mode == ConversationMode::ExchangeTurns {
-        db.init_exchange_round_state(
-            invite.conversation_id,
+    let invitee_name = db.get_display_name(phone).await?;
+    whatsapp
+        .send_text(
             &invite.inviter_phone,
-            &conversation.target_language,
-            true,
+            &format!(
+                "{} accepted your invite — waiting for them to pick their language.",
+                contact_label(phone, invitee_name.as_deref())
+            ),
         )
         .await?;
-    }
-
-    let inviter_name = db.get_display_name(&invite.inviter_phone).await?;
-    let inviter_label = contact_label(&invite.inviter_phone, inviter_name.as_deref());
-    let invitee_name = db.get_display_name(phone).await?;
-    let invitee_label = contact_label(phone, invitee_name.as_deref());
-
-    let (invitee_message, inviter_message) = match conversation.mode {
-        ConversationMode::ExchangeTurns => (
-            format!(
-                "You're connected! You'll take turns writing in the same language — \
-                 first both write in {}, then both write in {}.\n\n\
-                 {inviter_label} goes first in {}.",
-                conversation.target_language,
-                conversation.source_language,
-                conversation.target_language
-            ),
-            format!(
-                "You're connected to {invitee_label}! You'll take turns writing in the same language — \
-                 first both write in {}, then both write in {}.\n\n\
-                 You go first in {}.",
-                conversation.target_language,
-                conversation.source_language,
-                conversation.target_language
-            ),
-        ),
-        ConversationMode::Exchange => (
-            format!(
-                "You're connected! Exchange mode — you learn {}. \
-                 Always write in that language.",
-                conversation.source_language
-            ),
-            format!(
-                "You're connected to {invitee_label}! Exchange mode — you learn {}. \
-                 Always write in that language.",
-                conversation.target_language
-            ),
-        ),
-        ConversationMode::Tutor => unreachable!(),
-    };
-
-    whatsapp.send_text(phone, &invitee_message).await?;
-    whatsapp.send_text(&invite.inviter_phone, &inviter_message).await?;
 
     Ok(())
 }

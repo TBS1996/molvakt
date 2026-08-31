@@ -446,7 +446,20 @@ impl Bot {
         self.db
             .ensure_exchange_round_initialized(conversation, &sender.phone)
             .await?;
-        let conversation = self.db.get_conversation(conversation.id).await?;
+        let mut conversation = self.db.get_conversation(conversation.id).await?;
+
+        let (lang_a, lang_b) = self.db.exchange_language_pair(&conversation).await?;
+        let active = conversation.exchange_active_language();
+        if active != lang_a && active != lang_b {
+            let starter = conversation
+                .exchange_turn_phone
+                .as_deref()
+                .unwrap_or(&sender.phone);
+            self.db
+                .init_exchange_round_state(conversation.id, starter, &lang_a, true)
+                .await?;
+            conversation = self.db.get_conversation(conversation.id).await?;
+        }
 
         let partner = self
             .db
@@ -458,7 +471,8 @@ impl Bot {
             .as_deref()
             .context("exchange turns not initialized")?;
         let active_language = conversation.exchange_active_language();
-        let other_language = conversation.other_exchange_language(active_language);
+        let other_language =
+            conversation.other_exchange_language_in_pair(active_language, &lang_a, &lang_b);
 
         if sender.phone != turn_phone {
             let holder_name = self.db.get_display_name(turn_phone).await?;

@@ -592,6 +592,20 @@ pub async fn handle_set_language(
     if per_participant_language {
         db.update_learning_language(conversation_id, phone, &command.language)
             .await?;
+
+        let conversation = db.get_conversation(conversation_id).await?;
+        if conversation.mode == ConversationMode::ExchangeTurns {
+            let (lang_a, lang_b) = db.exchange_language_pair(&conversation).await?;
+            let active = conversation.exchange_active_language();
+            if active != lang_a && active != lang_b {
+                let starter = conversation
+                    .exchange_turn_phone
+                    .as_deref()
+                    .unwrap_or(phone);
+                db.init_exchange_round_state(conversation_id, starter, &lang_a, true)
+                    .await?;
+            }
+        }
     } else {
         db.update_target_language(conversation_id, phone, &command.language)
             .await?;

@@ -46,6 +46,14 @@ impl Conversation {
             self.target_language.clone()
         }
     }
+
+    pub fn other_exchange_language_in_pair(&self, current: &str, lang_a: &str, lang_b: &str) -> String {
+        if current == lang_a {
+            lang_b.to_string()
+        } else {
+            lang_a.to_string()
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -791,7 +799,7 @@ impl Db {
             return Ok(());
         }
 
-        let initial_language = conversation.target_language.clone();
+        let (initial_language, _) = self.exchange_language_pair(conversation).await?;
         let strict_turns = conversation.mode == ConversationMode::ExchangeTurns;
         self.init_exchange_round_state(
             conversation.id,
@@ -837,8 +845,12 @@ impl Db {
             });
         }
 
-        let new_language = conversation.other_exchange_language(&active_language);
-        let new_starter = normalize_phone(sender_phone);
+        let (lang_a, lang_b) = self.exchange_language_pair(conversation).await?;
+        let new_language = conversation.other_exchange_language_in_pair(&active_language, &lang_a, &lang_b);
+        let new_starter = conversation
+            .exchange_round_starter_phone
+            .clone()
+            .unwrap_or_else(|| normalize_phone(sender_phone));
         let next_turn = if strict_turns {
             Some(new_starter.clone())
         } else {
@@ -1159,6 +1171,43 @@ impl Db {
         }
 
         Ok((requester, partner))
+    }
+
+    pub async fn exchange_language_pair(
+        &self,
+        conversation: &Conversation,
+    ) -> anyhow::Result<(String, String)> {
+        let participants = self
+            .find_participants_in_conversation(conversation.id)
+            .await?;
+        let mut languages: Vec<String> = participants
+            .iter()
+            .filter_map(|participant| participant.learning_language.clone())
+            .collect();
+        languages.sort();
+        languages.dedup();
+
+        if languages.len() >= 2 {
+            return Ok((languages[0].clone(), languages[1].clone()));
+        }
+
+        Ok((
+            conversation.target_language.clone(),
+            conversation.source_language.clone(),
+        ))
+    }
+
+    pub async fn update_source_language(
+        &self,
+        conversation_id: i64,
+        source_language: &str,
+    ) -> anyhow::Result<()> {
+        sqlx::query("UPDATE conversations SET source_language = ? WHERE id = ?")
+            .bind(source_language)
+            .bind(conversation_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn update_target_language(
