@@ -17,7 +17,7 @@ use crate::menu::{
     MenuSessionOutcome,
 };
 use crate::onboarding;
-use crate::phone::{contact_label, partner_label};
+use crate::phone::{contact_label, normalize_phone, partner_label, phones_match};
 use crate::vocab;
 use crate::whatsapp::WhatsApp;
 
@@ -498,9 +498,6 @@ impl Bot {
             .exchange_turn_phone
             .as_deref()
             .context("exchange turns not initialized")?;
-        let active_language = conversation.exchange_active_language();
-        let other_language =
-            conversation.other_exchange_language_in_pair(active_language, &lang_a, &lang_b);
 
         if sender.phone != turn_phone {
             let holder_name = self.db.get_display_name(turn_phone).await?;
@@ -508,13 +505,32 @@ impl Bot {
                 .send_text(
                     &sender.phone,
                     &format!(
-                        "It's {}'s turn — wait for them to write in {active_language}.",
-                        contact_label(turn_phone, holder_name.as_deref())
+                        "It's {}'s turn — wait for them to write in {}.",
+                        contact_label(turn_phone, holder_name.as_deref()),
+                        conversation.exchange_active_language()
                     ),
                 )
                 .await?;
             return Ok(());
         }
+
+        let active_language = conversation.exchange_active_language();
+        let mut session = self.db.load_learner_session(sender.id).await?;
+        if session != LearnerSession::Idle {
+            return self
+                .handle_exchange_turns_in_review(
+                    sender,
+                    &partner,
+                    text,
+                    &conversation,
+                    &mut session,
+                    active_language,
+                )
+                .await;
+        }
+
+        let other_language =
+            conversation.other_exchange_language_in_pair(active_language, &lang_a, &lang_b);
 
         let history = self.db.load_history(conversation.id).await?;
         let llm = Llm::for_exchange(active_language, &other_language)?;
@@ -532,10 +548,62 @@ impl Bot {
             return Ok(());
         }
 
+        self.finish_exchange_turns_message(sender, &partner, &conversation, text, active_language)
+            .await
+    }
+
+    async fn handle_exchange_turns_in_review(
+        &self,
+        sender: &Participant,
+        partner: &Participant,
+        text: &str,
+        conversation: &Conversation,
+        session: &mut LearnerSession,
+        active_language: &str,
+    ) -> anyhow::Result<()> {
+        let history = self.db.load_history(conversation.id).await?;
+        let llm = Llm::for_exchange(active_language, "English")?;
+        let sender_name = self.db.get_display_name(&sender.phone).await?;
+        let sender_label = partner_label(
+            &sender.phone,
+            active_language,
+            sender_name.as_deref(),
+        );
+        let turn =
+            flow::handle_learner_message(session, text, &history, &llm, &sender_label).await?;
+        self.db
+            .save_learner_session(sender.id, session)
+            .await?;
+
+        for message in turn.learner_messages {
+            self.whatsapp.send_text(&sender.phone, &message).await?;
+        }
+
+        if turn.show_review_choices {
+            self.send_review_choices(&sender.phone).await?;
+        }
+
+        if let Some(reply) = turn.completed_reply {
+            self.finish_exchange_turns_message(sender, partner, conversation, &reply, active_language)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn finish_exchange_turns_message(
+        &self,
+        sender: &Participant,
+        partner: &Participant,
+        conversation: &Conversation,
+        text: &str,
+        active_language: &str,
+    ) -> anyhow::Result<()> {
         self.db
             .insert_exchange_message(conversation.id, sender, text)
             .await?;
 
+        let conversation = self.db.get_conversation(conversation.id).await?;
         let advance = self
             .db
             .advance_exchange_after_message(
@@ -549,8 +617,13 @@ impl Bot {
 
         let sender_name = self.db.get_display_name(&sender.phone).await?;
         let sender_label = contact_label(&sender.phone, sender_name.as_deref());
-        let partner_name = self.db.get_display_name(&partner.phone).await?;
-        let partner_label = contact_label(&partner.phone, partner_name.as_deref());
+        let partner_label = contact_label(
+            &partner.phone,
+            self.db
+                .get_display_name(&partner.phone)
+                .await?
+                .as_deref(),
+        );
         let mut outgoing = format!("[{sender_label}]: {text}");
 
         if advance.flipped_language {
@@ -582,6 +655,20 @@ impl Bot {
             .await?;
 
         self.whatsapp.send_text(&partner.phone, &outgoing).await?;
+
+        let partner_should_reply = !advance.flipped_language
+            || advance
+                .next_turn_phone
+                .as_deref()
+                .is_some_and(|phone| phones_match(phone, &partner.phone));
+        if partner_should_reply {
+            let (review_session, _) = flow::begin_review(text.to_string(), &sender_label);
+            self.db
+                .save_learner_session(partner.id, &review_session)
+                .await?;
+            self.send_review_choices(&partner.phone).await?;
+        }
+
         self.whatsapp
             .send_text(
                 &sender.phone,
