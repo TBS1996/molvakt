@@ -109,7 +109,7 @@ pub async fn handle_list(db: &Db, whatsapp: &WhatsApp, phone: &str) -> anyhow::R
             .send_text(
                 phone,
                 "You don't have any conversations yet.\n\n\
-                 Reply LEARNER or TEACHER to start one.",
+                 Reply LEARNER, TEACHER, EXCHANGE, or EXCHANGE-TURNS to start one.",
             )
             .await?;
         return Ok(());
@@ -129,7 +129,7 @@ pub async fn handle_list(db: &Db, whatsapp: &WhatsApp, phone: &str) -> anyhow::R
     lines.push("Reply CANCEL <number> to remove a pending invite.".into());
     lines.push("Reply SET LANGUAGE <name> to fix the language on the active conversation.".into());
     lines.push("Reply SET <number> <language> to fix a specific one.".into());
-    lines.push("Reply LEARNER or TEACHER to start a new one.".into());
+    lines.push("Reply LEARNER, TEACHER, EXCHANGE, or EXCHANGE-TURNS to start a new one.".into());
 
     whatsapp.send_text(phone, &lines.join("\n")).await?;
     Ok(())
@@ -544,8 +544,10 @@ pub async fn handle_help(whatsapp: &WhatsApp, phone: &str) -> anyhow::Result<()>
              CANCEL <number> — cancel a pending invite\n\
              SET LANGUAGE <name> — fix language on active conversation\n\
              SET <number> <language> — fix language on a specific one\n\
-             LEARNER — start practicing a new language\n\
-             TEACHER — teach someone a new language\n\n\
+             LEARNER — tutor mode, you practice a language\n\
+             TEACHER — tutor mode, you teach your language\n\
+             EXCHANGE — language exchange (write anytime in your language)\n\
+             EXCHANGE-TURNS — language exchange (take turns, one message each)\n\n\
              In an active conversation, just message normally.",
         )
         .await?;
@@ -625,10 +627,25 @@ pub fn is_help_command(text: &str) -> bool {
     matches!(text.trim().to_ascii_uppercase().as_str(), "HELP" | "COMMANDS")
 }
 
-pub fn is_new_conversation_command(text: &str) -> Option<crate::db::ParticipantRole> {
+pub enum StartConversationCommand {
+    Tutor(crate::db::ParticipantRole),
+    Exchange(crate::db::ConversationMode),
+}
+
+pub fn parse_start_conversation_command(text: &str) -> Option<StartConversationCommand> {
     match text.trim().to_ascii_uppercase().as_str() {
-        "LEARNER" => Some(crate::db::ParticipantRole::Learner),
-        "TEACHER" => Some(crate::db::ParticipantRole::Teacher),
+        "LEARNER" => Some(StartConversationCommand::Tutor(
+            crate::db::ParticipantRole::Learner,
+        )),
+        "TEACHER" => Some(StartConversationCommand::Tutor(
+            crate::db::ParticipantRole::Teacher,
+        )),
+        "EXCHANGE" => Some(StartConversationCommand::Exchange(
+            crate::db::ConversationMode::Exchange,
+        )),
+        "EXCHANGE-TURNS" | "EXCHANGE_TURNS" | "TURNS" => Some(StartConversationCommand::Exchange(
+            crate::db::ConversationMode::ExchangeTurns,
+        )),
         _ => None,
     }
 }

@@ -2,8 +2,9 @@ use anyhow::Context;
 
 use crate::conversations::{
     format_chat_label, handle_cancel, handle_help, handle_list, handle_set_language, handle_set_mode,
-    handle_switch, is_help_command, is_list_command, is_new_conversation_command,
-    parse_cancel_selection, parse_set_language, parse_set_mode, parse_switch_selection,
+    handle_switch, is_help_command, is_list_command, parse_cancel_selection,
+    parse_set_language, parse_set_mode, parse_start_conversation_command, parse_switch_selection,
+    StartConversationCommand,
 };
 use crate::db::{
     Conversation, ConversationMode, Db, MessageRole, Participant, ParticipantResolve,
@@ -105,8 +106,21 @@ impl Bot {
             return handle_cancel(&self.db, &self.whatsapp, phone, selection).await;
         }
 
-        if let Some(role) = is_new_conversation_command(text) {
-            return onboarding::start_new_conversation(&self.db, &self.whatsapp, phone, role).await;
+        if let Some(command) = parse_start_conversation_command(text) {
+            return match command {
+                StartConversationCommand::Tutor(role) => {
+                    onboarding::start_new_conversation(&self.db, &self.whatsapp, phone, role).await
+                }
+                StartConversationCommand::Exchange(mode) => {
+                    onboarding::start_new_exchange_conversation(
+                        &self.db,
+                        &self.whatsapp,
+                        phone,
+                        mode,
+                    )
+                    .await
+                }
+            };
         }
 
         match self.db.resolve_participant_for_message(phone).await? {
@@ -141,7 +155,7 @@ impl Bot {
                 self.whatsapp
                     .send_text(
                         phone,
-                        "That conversation is no longer active. Reply LEARNER or TEACHER to start a new one.",
+                        "That conversation is no longer active. Reply LEARNER, TEACHER, EXCHANGE, or EXCHANGE-TURNS to start a new one.",
                     )
                     .await?;
                 Ok(())
