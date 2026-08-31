@@ -204,7 +204,14 @@ async fn continue_onboarding(
             {
                 "What language do you want to learn? (e.g. Norwegian)"
             } else {
-                "What language will you practice? (e.g. Norwegian)"
+                match data.role {
+                    Some(ParticipantRole::Teacher) => {
+                        "What language will you teach? (e.g. Norwegian)"
+                    }
+                    Some(ParticipantRole::Learner) | None => {
+                        "What language will you practice? (e.g. Norwegian)"
+                    }
+                }
             };
             whatsapp.send_text(phone, prompt).await?;
         }
