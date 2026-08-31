@@ -1,3 +1,5 @@
+-- no-transaction
+
 PRAGMA foreign_keys=OFF;
 
 CREATE TABLE conversations_new (
