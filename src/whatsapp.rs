@@ -14,6 +14,8 @@ pub struct WhatsApp {
 pub struct ParsedIncomingMessage {
     pub from: String,
     pub text: String,
+    /// True when the user tapped a list row or reply button (not typed text).
+    pub is_interactive: bool,
     pub profile_name: Option<String>,
 }
 
@@ -102,7 +104,7 @@ impl WhatsApp {
                 let value = change.value.unwrap_or_default();
                 let contacts = value.contacts.unwrap_or_default();
                 for message in value.messages.unwrap_or_default() {
-                    if let Some(text) = message_body(&message) {
+                    if let Some((text, is_interactive)) = message_body(&message) {
                         let profile_name = contacts
                             .iter()
                             .find(|contact| {
@@ -113,6 +115,7 @@ impl WhatsApp {
                         messages.push(ParsedIncomingMessage {
                             from: message.from,
                             text,
+                            is_interactive,
                             profile_name,
                         });
                     }
@@ -250,14 +253,23 @@ impl WhatsApp {
     }
 }
 
-fn message_body(message: &IncomingMessage) -> Option<String> {
+fn message_body(message: &IncomingMessage) -> Option<(String, bool)> {
     match message.message_type.as_str() {
-        "text" => message.text.as_ref().map(|text| text.body.clone()),
+        "text" => message
+            .text
+            .as_ref()
+            .map(|text| (text.body.clone(), false)),
         "interactive" => {
             let interactive = message.interactive.as_ref()?;
             match interactive.interactive_type.as_str() {
-                "button_reply" => interactive.button_reply.as_ref().map(|reply| reply.id.clone()),
-                "list_reply" => interactive.list_reply.as_ref().map(|reply| reply.id.clone()),
+                "button_reply" => interactive
+                    .button_reply
+                    .as_ref()
+                    .map(|reply| (reply.id.clone(), true)),
+                "list_reply" => interactive
+                    .list_reply
+                    .as_ref()
+                    .map(|reply| (reply.id.clone(), true)),
                 _ => None,
             }
         }

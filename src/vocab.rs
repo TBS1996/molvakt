@@ -157,22 +157,20 @@ pub async fn handle_flashcard_session(
     phone: &str,
     text: &str,
     data: MenuData,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     if is_vocab_button(text) {
         let Some(card_id) = data.flashcard_id else {
             whatsapp
                 .send_text(phone, "Session expired. Reply MENU to start over.")
                 .await?;
             db.clear_menu_session(phone).await?;
-            return Ok(());
+            return Ok(true);
         };
-        return handle_vocab_button(db, whatsapp, phone, text, card_id).await;
+        handle_vocab_button(db, whatsapp, phone, text, card_id).await?;
+        return Ok(true);
     }
 
-    whatsapp
-        .send_text(phone, "Use the buttons to review. Reply MENU to exit.")
-        .await?;
-    Ok(())
+    Ok(false)
 }
 
 async fn review_language_for_phone(

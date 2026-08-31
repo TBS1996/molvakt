@@ -10,7 +10,7 @@ use crate::db::{
     MenuStep, ParticipantRole,
 };
 use crate::onboarding::{self, start_new_conversation, start_new_exchange_conversation};
-use crate::phone::{contact_label, normalize_phone, phones_match};
+use crate::phone::{contact_label, looks_like_phone, normalize_phone, phones_match};
 use crate::vocab;
 use crate::whatsapp::WhatsApp;
 
@@ -36,6 +36,11 @@ const MODE_TURNS: &str = "menu_mode_turns";
 const CONV_PREFIX: &str = "menu_conv_";
 const MAX_MENU_CONVERSATIONS: usize = 10;
 
+pub enum MenuSessionOutcome {
+    Handled,
+    ContinueAsChat,
+}
+
 pub fn is_menu_command(text: &str) -> bool {
     matches!(text.trim().to_ascii_uppercase().as_str(), "MENU")
 }
@@ -52,9 +57,10 @@ pub async fn handle_menu_session(
     text: &str,
     step: MenuStep,
     data: MenuData,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<MenuSessionOutcome> {
     if is_menu_command(text) {
-        return handle_menu_command(db, whatsapp, phone).await;
+        handle_menu_command(db, whatsapp, phone).await?;
+        return Ok(MenuSessionOutcome::Handled);
     }
 
     match step {
@@ -62,20 +68,15 @@ pub async fn handle_menu_session(
             let action = data.action.context("missing menu action")?;
             let listings = listings_for_action(db, phone, action).await?;
             let Some(index) = parse_conversation_selection(text, listings.len()) else {
-                whatsapp
-                    .send_text(phone, "Invalid selection. Reply MENU to start over.")
-                    .await?;
-                return Ok(());
+                return Ok(MenuSessionOutcome::ContinueAsChat);
             };
             db.clear_menu_session(phone).await?;
-            apply_conversation_action(db, whatsapp, phone, action, index).await
+            apply_conversation_action(db, whatsapp, phone, action, index).await?;
+            Ok(MenuSessionOutcome::Handled)
         }
         MenuStep::PickMode => {
             let Some(mode) = parse_mode_selection(text) else {
-                whatsapp
-                    .send_text(phone, "Invalid selection. Reply MENU to start over.")
-                    .await?;
-                return Ok(());
+                return Ok(MenuSessionOutcome::ContinueAsChat);
             };
             db.clear_menu_session(phone).await?;
             handle_set_mode(
@@ -87,9 +88,24 @@ pub async fn handle_menu_session(
                     mode,
                 },
             )
-            .await
+            .await?;
+            Ok(MenuSessionOutcome::Handled)
         }
         MenuStep::AwaitLanguage => {
+            let language = text.trim();
+            if language.is_empty() || language.contains(char::is_whitespace) {
+                return Ok(MenuSessionOutcome::ContinueAsChat);
+            }
+            if looks_like_phone(language) {
+                whatsapp
+                    .send_text(
+                        phone,
+                        "That looks like a phone number, not a language.\n\
+                         Example: Norwegian — or send a chat message to skip.",
+                    )
+                    .await?;
+                return Ok(MenuSessionOutcome::Handled);
+            }
             db.clear_menu_session(phone).await?;
             handle_set_language(
                 db,
@@ -97,12 +113,19 @@ pub async fn handle_menu_session(
                 phone,
                 SetLanguageCommand {
                     index: None,
-                    language: text.trim().to_string(),
+                    language: language.to_string(),
                 },
             )
-            .await
+            .await?;
+            Ok(MenuSessionOutcome::Handled)
         }
-        MenuStep::FlashcardReview => vocab::handle_flashcard_session(db, whatsapp, phone, text, data).await,
+        MenuStep::FlashcardReview => {
+            if vocab::handle_flashcard_session(db, whatsapp, phone, text, data).await? {
+                Ok(MenuSessionOutcome::Handled)
+            } else {
+                Ok(MenuSessionOutcome::ContinueAsChat)
+            }
+        }
     }
 }
 

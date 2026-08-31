@@ -12,7 +12,10 @@ use crate::db::{
 };
 use crate::flow::{self, LearnerSession};
 use crate::llm::Llm;
-use crate::menu::{handle_menu_command, handle_menu_selection, handle_menu_session, is_menu_command};
+use crate::menu::{
+    handle_menu_command, handle_menu_selection, handle_menu_session, is_menu_command,
+    MenuSessionOutcome,
+};
 use crate::onboarding;
 use crate::phone::{contact_label, partner_label};
 use crate::vocab;
@@ -52,7 +55,7 @@ impl Bot {
                 }
             }
             if let Err(error) = self
-                .handle_message(&message.from, &message.text)
+                .handle_message(&message.from, &message.text, message.is_interactive)
                 .await
             {
                 eprintln!("error handling message from {}: {error:?}", message.from);
@@ -68,7 +71,12 @@ impl Bot {
         Ok(())
     }
 
-    async fn handle_message(&self, phone: &str, text: &str) -> anyhow::Result<()> {
+    async fn handle_message(
+        &self,
+        phone: &str,
+        text: &str,
+        is_interactive: bool,
+    ) -> anyhow::Result<()> {
         if let Some(invite) = self.db.find_pending_invite_for_phone(phone).await? {
             return onboarding::handle_invite_response(&self.db, &self.whatsapp, phone, text, invite)
                 .await;
@@ -85,7 +93,19 @@ impl Bot {
         }
 
         if let Some((step, data)) = self.db.load_menu_session(phone).await? {
-            return handle_menu_session(&self.db, &self.whatsapp, phone, text, step, data).await;
+            match handle_menu_session(&self.db, &self.whatsapp, phone, text, step, data).await? {
+                MenuSessionOutcome::Handled => return Ok(()),
+                MenuSessionOutcome::ContinueAsChat => {
+                    self.db.clear_menu_session(phone).await?;
+                    if handle_menu_selection(&self.db, &self.whatsapp, phone, text).await? {
+                        return Ok(());
+                    }
+                    if is_interactive {
+                        // Tapped a button/list item that doesn't apply to this step.
+                        return Ok(());
+                    }
+                }
+            }
         }
 
         if is_menu_command(text) {
