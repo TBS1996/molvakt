@@ -10,7 +10,105 @@ fn format_language_name(language: &str) -> String {
     }
 }
 
-fn format_listing_status(listing: &crate::db::ConversationListing) -> String {
+pub fn listing_is_broken(listing: &ConversationListing, viewer_phone: &str) -> bool {
+    listing
+        .partner_phone
+        .as_ref()
+        .is_some_and(|partner| phones_match(partner, viewer_phone))
+}
+
+pub fn format_listing_partner(listing: &ConversationListing) -> String {
+    listing
+        .partner_phone
+        .as_deref()
+        .map(|phone| contact_label(phone, listing.partner_display_name.as_deref()))
+        .unwrap_or_else(|| "unknown".into())
+}
+
+pub fn format_listing_role_desc(listing: &ConversationListing) -> String {
+    let language = format_language_name(&listing.target_language);
+    if listing.mode == ConversationMode::Exchange {
+        format_exchange_role_desc(listing, false)
+    } else if listing.mode == ConversationMode::ExchangeTurns {
+        format_exchange_role_desc(listing, true)
+    } else {
+        match listing.role {
+            crate::db::ParticipantRole::Teacher => format!("You teach {language}"),
+            crate::db::ParticipantRole::Learner => format!("You learn {language}"),
+        }
+    }
+}
+
+pub fn format_listing_status_text(listing: &ConversationListing) -> String {
+    if listing.is_pending {
+        "waiting for partner".to_string()
+    } else if let Some(turn) = listing.turn {
+        turn.label().to_string()
+    } else {
+        String::new()
+    }
+}
+
+pub fn format_listing_menu_description(
+    listing: &ConversationListing,
+    viewer_phone: &str,
+) -> String {
+    if listing_is_broken(listing, viewer_phone) {
+        return "Invalid invite".to_string();
+    }
+
+    let mut description = format_listing_role_desc(listing);
+    let status = format_listing_status_text(listing);
+    if !status.is_empty() {
+        description.push_str(", ");
+        description.push_str(&status);
+    }
+    if description.len() > 72 {
+        description.truncate(72);
+    }
+    description
+}
+
+fn format_active_chat_summary(listing: &ConversationListing, viewer_phone: &str) -> String {
+    let partner = format_listing_partner(listing);
+    if listing_is_broken(listing, viewer_phone) {
+        return format!("Current chat: {partner}\nInvalid invite — cancel it from the menu.");
+    }
+    if listing.is_pending {
+        return format!("Current chat: {partner}\nWaiting for partner to accept.");
+    }
+
+    let role_desc = format_listing_role_desc(listing);
+    let status = format_listing_status_text(listing);
+    if status.is_empty() {
+        format!("Current chat: {partner}\n{role_desc}")
+    } else {
+        format!("Current chat: {partner}\n{role_desc}\n{status}")
+    }
+}
+
+pub async fn format_menu_body(db: &Db, phone: &str) -> anyhow::Result<String> {
+    let listings = db.list_conversations_for_phone(phone).await?;
+    if listings.is_empty() {
+        return Ok("No chats yet — start one below.".to_string());
+    }
+
+    let viewer_phone = normalize_phone(phone);
+    if let Some(listing) = listings.iter().find(|listing| listing.is_active) {
+        return Ok(format_active_chat_summary(listing, &viewer_phone));
+    }
+
+    if listings.len() == 1 {
+        return Ok(format!(
+            "{}\n\n(This is your only chat — it becomes active when you message.)",
+            format_active_chat_summary(&listings[0], &viewer_phone)
+        ));
+    }
+
+    Ok("No active chat — use Switch chat below.".to_string())
+}
+
+fn format_listing_status(listing: &ConversationListing) -> String {
     let mut tags = Vec::new();
     if listing.is_active {
         tags.push("active");
@@ -27,10 +125,7 @@ fn format_listing_status(listing: &crate::db::ConversationListing) -> String {
     }
 }
 
-fn format_exchange_role_desc(
-    listing: &crate::db::ConversationListing,
-    turns: bool,
-) -> String {
+fn format_exchange_role_desc(listing: &ConversationListing, turns: bool) -> String {
     let your_language = listing
         .learning_language
         .as_deref()
@@ -51,35 +146,14 @@ fn format_exchange_role_desc(
 
 pub fn format_listing_line(
     index: usize,
-    listing: &crate::db::ConversationListing,
+    listing: &ConversationListing,
     viewer_phone: &str,
 ) -> String {
-    let language = format_language_name(&listing.target_language);
-    let partner = listing
-        .partner_phone
-        .as_deref()
-        .map(|phone| contact_label(phone, listing.partner_display_name.as_deref()))
-        .unwrap_or_else(|| "unknown".into());
-
-    let broken = listing
-        .partner_phone
-        .as_ref()
-        .is_some_and(|partner| phones_match(partner, viewer_phone));
-
-    let role_desc = if listing.mode == ConversationMode::Exchange {
-        format_exchange_role_desc(listing, false)
-    } else if listing.mode == ConversationMode::ExchangeTurns {
-        format_exchange_role_desc(listing, true)
-    } else {
-        match listing.role {
-            crate::db::ParticipantRole::Teacher => format!("You teach {language}"),
-            crate::db::ParticipantRole::Learner => format!("You learn {language}"),
-        }
-    };
-
+    let partner = format_listing_partner(listing);
+    let role_desc = format_listing_role_desc(listing);
     let status = format_listing_status(listing);
 
-    if broken {
+    if listing_is_broken(listing, viewer_phone) {
         format!(
             "{index}. {role_desc} — partner: {partner} [invalid — reply CANCEL {index}]"
         )
@@ -153,12 +227,7 @@ pub async fn handle_switch(
     };
 
     let viewer_phone = normalize_phone(phone);
-    let broken = listing
-        .partner_phone
-        .as_ref()
-        .is_some_and(|partner| phones_match(partner, &viewer_phone));
-
-    if broken {
+    if listing_is_broken(listing, &viewer_phone) {
         whatsapp
             .send_text(
                 phone,
@@ -181,39 +250,16 @@ pub async fn handle_switch(
     db.set_active_conversation(phone, listing.conversation_id)
         .await?;
 
-    let language = format_language_name(&listing.target_language);
-    let partner = listing
-        .partner_phone
-        .as_deref()
-        .map(|phone| contact_label(phone, listing.partner_display_name.as_deref()))
-        .unwrap_or_else(|| "your partner".into());
-    let role_desc = if listing.mode == ConversationMode::Exchange {
-        let your_language = listing
-            .learning_language
-            .as_deref()
-            .map(format_language_name)
-            .unwrap_or_else(|| "unknown".into());
-        format!("Exchange — you learn {your_language} (write in that language)")
-    } else if listing.mode == ConversationMode::ExchangeTurns {
-        let your_language = listing
-            .learning_language
-            .as_deref()
-            .map(format_language_name)
-            .unwrap_or_else(|| "unknown".into());
-        format!("Exchange (turns) — you learn {your_language}")
+    let role_desc = format_listing_role_desc(listing);
+    let partner = format_listing_partner(listing);
+    let status = format_listing_status_text(listing);
+    let message = if status.is_empty() {
+        format!("Switched to {role_desc} — partner: {partner}.")
     } else {
-        match listing.role {
-            crate::db::ParticipantRole::Teacher => format!("You teach {language}"),
-            crate::db::ParticipantRole::Learner => format!("You learn {language}"),
-        }
+        format!("Switched to {role_desc} — partner: {partner} ({status}).")
     };
 
-    whatsapp
-        .send_text(
-            phone,
-            &format!("Switched to {role_desc} — partner: {partner}."),
-        )
-        .await?;
+    whatsapp.send_text(phone, &message).await?;
     Ok(())
 }
 

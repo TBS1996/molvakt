@@ -61,6 +61,7 @@ pub struct Participant {
     pub learning_language: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct ConversationListing {
     pub conversation_id: i64,
     pub mode: ConversationMode,

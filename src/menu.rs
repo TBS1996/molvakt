@@ -1,8 +1,9 @@
 use anyhow::Context;
 
 use crate::conversations::{
-    handle_cancel_listing, handle_help, handle_list, handle_set_language, handle_set_mode,
-    handle_switch, SetLanguageCommand, SetModeCommand,
+    format_listing_menu_description, format_listing_partner, format_menu_body, handle_cancel_listing,
+    handle_help, handle_list, handle_set_language, handle_set_mode, handle_switch,
+    listing_is_broken, SetLanguageCommand, SetModeCommand,
 };
 use crate::db::{
     ConversationListing, ConversationMode, ConversationModeSetting, Db, MenuAction, MenuData,
@@ -39,7 +40,7 @@ pub fn is_menu_command(text: &str) -> bool {
 
 pub async fn handle_menu_command(db: &Db, whatsapp: &WhatsApp, phone: &str) -> anyhow::Result<()> {
     db.clear_menu_session(phone).await?;
-    send_main_menu(whatsapp, phone).await
+    send_main_menu(db, whatsapp, phone).await
 }
 
 pub async fn handle_menu_session(
@@ -68,7 +69,6 @@ pub async fn handle_menu_session(
             apply_conversation_action(db, whatsapp, phone, action, index).await
         }
         MenuStep::PickMode => {
-            let index = data.conversation_index.context("missing conversation index")?;
             let Some(mode) = parse_mode_selection(text) else {
                 whatsapp
                     .send_text(phone, "Invalid selection. Reply MENU to start over.")
@@ -81,21 +81,20 @@ pub async fn handle_menu_session(
                 whatsapp,
                 phone,
                 SetModeCommand {
-                    index: Some(index),
+                    index: None,
                     mode,
                 },
             )
             .await
         }
         MenuStep::AwaitLanguage => {
-            let index = data.conversation_index.context("missing conversation index")?;
             db.clear_menu_session(phone).await?;
             handle_set_language(
                 db,
                 whatsapp,
                 phone,
                 SetLanguageCommand {
-                    index: Some(index),
+                    index: None,
                     language: text.trim().to_string(),
                 },
             )
@@ -120,11 +119,11 @@ pub async fn handle_menu_selection(
             Ok(true)
         }
         MAIN_SET_MODE => {
-            start_conversation_pick(db, whatsapp, phone, MenuAction::SetMode).await?;
+            start_set_mode_on_active(db, whatsapp, phone).await?;
             Ok(true)
         }
         MAIN_SET_LANGUAGE => {
-            start_conversation_pick(db, whatsapp, phone, MenuAction::SetLanguage).await?;
+            start_set_language_on_active(db, whatsapp, phone).await?;
             Ok(true)
         }
         MAIN_CANCEL => {
@@ -161,23 +160,21 @@ pub async fn handle_menu_selection(
             Ok(true)
         }
         MODE_TEACHER | MODE_LEARNER | MODE_EXCHANGE | MODE_TURNS => {
-            if let Some((step, data)) = db.load_menu_session(phone).await? {
+            if let Some((step, _)) = db.load_menu_session(phone).await? {
                 if step == MenuStep::PickMode {
-                    if let Some(index) = data.conversation_index {
-                        db.clear_menu_session(phone).await?;
-                        let mode = parse_mode_selection(selection).context("invalid mode")?;
-                        handle_set_mode(
-                            db,
-                            whatsapp,
-                            phone,
-                            SetModeCommand {
-                                index: Some(index),
-                                mode,
-                            },
-                        )
-                        .await?;
-                        return Ok(true);
-                    }
+                    db.clear_menu_session(phone).await?;
+                    let mode = parse_mode_selection(selection).context("invalid mode")?;
+                    handle_set_mode(
+                        db,
+                        whatsapp,
+                        phone,
+                        SetModeCommand {
+                            index: None,
+                            mode,
+                        },
+                    )
+                    .await?;
+                    return Ok(true);
                 }
             }
             Ok(false)
@@ -204,18 +201,19 @@ pub async fn handle_menu_selection(
     }
 }
 
-async fn send_main_menu(whatsapp: &WhatsApp, phone: &str) -> anyhow::Result<()> {
+async fn send_main_menu(db: &Db, whatsapp: &WhatsApp, phone: &str) -> anyhow::Result<()> {
+    let body = format_menu_body(db, phone).await?;
     whatsapp
         .send_list_menu(
             phone,
-            "molvakt menu — pick an action below.",
+            &format!("{body}\n\nPick an action below."),
             "Open menu",
             "Actions",
             &[
                 (MAIN_LIST, "View conversations", "See all your chats"),
                 (MAIN_SWITCH, "Switch chat", "Change active conversation"),
-                (MAIN_SET_MODE, "Set mode", "Tutor, exchange, or turns"),
-                (MAIN_SET_LANGUAGE, "Set language", "Fix language on a chat"),
+                (MAIN_SET_MODE, "Set mode", "Change mode on active chat"),
+                (MAIN_SET_LANGUAGE, "Set language", "Change language on active chat"),
                 (MAIN_CANCEL, "Cancel invite", "Remove a pending invite"),
                 (MAIN_START, "Start new", "Learner, teacher, or exchange"),
                 (MAIN_HELP, "Help", "How molvakt works"),
@@ -228,11 +226,11 @@ async fn send_start_menu(whatsapp: &WhatsApp, phone: &str) -> anyhow::Result<()>
     onboarding::send_welcome_menu(whatsapp, phone).await
 }
 
-async fn send_mode_menu(whatsapp: &WhatsApp, phone: &str) -> anyhow::Result<()> {
+async fn send_mode_menu(whatsapp: &WhatsApp, phone: &str, partner: &str) -> anyhow::Result<()> {
     whatsapp
         .send_list_menu(
             phone,
-            "Choose a mode for this conversation.",
+            &format!("Choose a mode for your chat with {partner}."),
             "Choose mode",
             "Modes",
             &[
@@ -243,6 +241,91 @@ async fn send_mode_menu(whatsapp: &WhatsApp, phone: &str) -> anyhow::Result<()> 
             ],
         )
         .await
+}
+
+async fn start_set_mode_on_active(
+    db: &Db,
+    whatsapp: &WhatsApp,
+    phone: &str,
+) -> anyhow::Result<()> {
+    let Some(listing) = require_active_listing(db, whatsapp, phone).await? else {
+        return Ok(());
+    };
+    let partner = format_listing_partner(&listing);
+
+    db.save_menu_session(phone, MenuStep::PickMode, &MenuData::default())
+        .await?;
+    send_mode_menu(whatsapp, phone, &partner).await
+}
+
+async fn start_set_language_on_active(
+    db: &Db,
+    whatsapp: &WhatsApp,
+    phone: &str,
+) -> anyhow::Result<()> {
+    let Some(listing) = require_active_listing(db, whatsapp, phone).await? else {
+        return Ok(());
+    };
+
+    let partner = format_listing_partner(&listing);
+    db.save_menu_session(phone, MenuStep::AwaitLanguage, &MenuData::default())
+        .await?;
+    whatsapp
+        .send_text(
+            phone,
+            &format!(
+                "What language should your chat with {partner} use? (e.g. Norwegian)"
+            ),
+        )
+        .await
+}
+
+async fn require_active_listing(
+    db: &Db,
+    whatsapp: &WhatsApp,
+    phone: &str,
+) -> anyhow::Result<Option<ConversationListing>> {
+    let listings = db.list_conversations_for_phone(phone).await?;
+    if listings.is_empty() {
+        whatsapp
+            .send_text(phone, "You don't have any conversations yet. Use Start new to create one.")
+            .await?;
+        return Ok(None);
+    }
+
+    let viewer_phone = normalize_phone(phone);
+    let listing = if let Some(active) = listings.iter().find(|listing| listing.is_active) {
+        active
+    } else if listings.len() == 1 {
+        &listings[0]
+    } else {
+        whatsapp
+            .send_text(
+                phone,
+                "No active chat. Use Switch chat first, then try again.",
+            )
+            .await?;
+        return Ok(None);
+    };
+
+    if listing_is_broken(listing, &viewer_phone) {
+        whatsapp
+            .send_text(phone, "Your active chat is invalid. Cancel it from the menu first.")
+            .await?;
+        return Ok(None);
+    }
+
+    if listing.is_pending {
+        whatsapp
+            .send_text(
+                phone,
+                "Your active chat is still waiting for your partner to accept.",
+            )
+            .await?;
+        return Ok(None);
+    }
+
+    Ok(Some(listing.clone()))
 }
 
 async fn start_conversation_pick(
@@ -390,36 +473,14 @@ fn listing_menu_labels_owned(
         .map(|phone| contact_label(phone, listing.partner_display_name.as_deref()))
         .unwrap_or_else(|| "unknown".into());
     let mut title = format!("{index}. {partner}");
+    if listing.is_active {
+        title.push('*');
+    }
     if title.len() > 24 {
         title.truncate(24);
     }
 
-    let mut description = if listing.is_active {
-        "Active chat".to_string()
-    } else if listing.is_pending {
-        "Waiting for partner".to_string()
-    } else if listing.mode == ConversationMode::Exchange {
-        "Exchange".to_string()
-    } else if listing.mode == ConversationMode::ExchangeTurns {
-        "Exchange (turns)".to_string()
-    } else {
-        match listing.role {
-            ParticipantRole::Teacher => "You teach".to_string(),
-            ParticipantRole::Learner => "You learn".to_string(),
-        }
-    };
-
-    if listing
-        .partner_phone
-        .as_ref()
-        .is_some_and(|partner| phones_match(partner, viewer_phone))
-    {
-        description = "Invalid invite".to_string();
-    }
-    if description.len() > 72 {
-        description.truncate(72);
-    }
-
+    let description = format_listing_menu_description(listing, viewer_phone);
     (title, description)
 }
 
@@ -442,34 +503,11 @@ async fn apply_conversation_action(
             };
             handle_cancel_listing(db, whatsapp, phone, listing).await
         }
-        MenuAction::SetMode => {
-            db.save_menu_session(
-                phone,
-                MenuStep::PickMode,
-                &MenuData {
-                    action: Some(action),
-                    conversation_index: Some(index),
-                },
-            )
-            .await?;
-            send_mode_menu(whatsapp, phone).await
-        }
-        MenuAction::SetLanguage => {
-            db.save_menu_session(
-                phone,
-                MenuStep::AwaitLanguage,
-                &MenuData {
-                    action: Some(action),
-                    conversation_index: Some(index),
-                },
-            )
-            .await?;
+        MenuAction::SetMode | MenuAction::SetLanguage => {
             whatsapp
-                .send_text(
-                    phone,
-                    "What language should this conversation use? (e.g. Norwegian)",
-                )
-                .await
+                .send_text(phone, "Reply MENU to start over.")
+                .await?;
+            Ok(())
         }
     }
 }
