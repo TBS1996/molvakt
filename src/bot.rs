@@ -443,6 +443,11 @@ impl Bot {
         text: &str,
         conversation: &Conversation,
     ) -> anyhow::Result<()> {
+        self.db
+            .ensure_exchange_round_initialized(conversation, &sender.phone)
+            .await?;
+        let conversation = self.db.get_conversation(conversation.id).await?;
+
         let partner = self
             .db
             .find_partner_participant(conversation.id, &sender.phone)
@@ -452,45 +457,35 @@ impl Bot {
             .exchange_turn_phone
             .as_deref()
             .context("exchange turns not initialized")?;
+        let active_language = conversation.exchange_active_language();
+        let other_language = conversation.other_exchange_language(active_language);
 
         if sender.phone != turn_phone {
-            let holder = if partner.phone == turn_phone {
-                &partner
-            } else {
-                sender
-            };
-            let holder_language = holder
-                .learning_language
-                .as_deref()
-                .unwrap_or(&conversation.target_language);
-            let holder_name = self.db.get_display_name(&holder.phone).await?;
+            let holder_name = self.db.get_display_name(turn_phone).await?;
             self.whatsapp
                 .send_text(
                     &sender.phone,
                     &format!(
-                        "It's {}'s turn — wait for them to write in {holder_language}.",
-                        contact_label(&holder.phone, holder_name.as_deref())
+                        "It's {}'s turn — wait for them to write in {active_language}.",
+                        contact_label(turn_phone, holder_name.as_deref())
                     ),
                 )
                 .await?;
             return Ok(());
         }
 
-        let learning_language = sender
-            .learning_language
-            .as_deref()
-            .unwrap_or(&conversation.target_language);
-        let partner_learning_language = partner
-            .learning_language
-            .as_deref()
-            .unwrap_or(&conversation.source_language);
-
         let history = self.db.load_history(conversation.id).await?;
-        let llm = Llm::for_exchange(learning_language, partner_learning_language)?;
+        let llm = Llm::for_exchange(active_language, &other_language)?;
         let judgment = llm.validate_reply(text, &history).await?;
         if !judgment.accepted {
             self.whatsapp
-                .send_text(&sender.phone, &judgment.feedback)
+                .send_text(
+                    &sender.phone,
+                    &format!(
+                        "{}\n\n(Write in {active_language} on your turn.)",
+                        judgment.feedback
+                    ),
+                )
                 .await?;
             return Ok(());
         }
@@ -498,17 +493,38 @@ impl Bot {
         self.db
             .insert_exchange_message(conversation.id, sender, text)
             .await?;
-        self.db
-            .pass_exchange_turn(conversation.id, &partner.phone)
+
+        let advance = self
+            .db
+            .advance_exchange_after_message(
+                conversation.id,
+                &conversation,
+                &sender.phone,
+                &partner.phone,
+                true,
+            )
             .await?;
 
         let sender_name = self.db.get_display_name(&sender.phone).await?;
         let sender_label = contact_label(&sender.phone, sender_name.as_deref());
         let partner_name = self.db.get_display_name(&partner.phone).await?;
         let partner_label = contact_label(&partner.phone, partner_name.as_deref());
-        let mut outgoing = format!(
-            "[{sender_label}]: {text}\n\nYour turn — write in {partner_learning_language}."
-        );
+        let mut outgoing = format!("[{sender_label}]: {text}");
+
+        if advance.flipped_language {
+            let next_phone = advance
+                .next_turn_phone
+                .as_deref()
+                .unwrap_or(&partner.phone);
+            let next_name = self.db.get_display_name(next_phone).await?;
+            outgoing.push_str(&format!(
+                "\n\nNew round in {} — {}'s turn.",
+                advance.active_language,
+                contact_label(next_phone, next_name.as_deref())
+            ));
+        } else {
+            outgoing.push_str(&format!("\n\nYour turn — write in {active_language}."));
+        }
 
         let previous_active = self
             .db
@@ -534,8 +550,8 @@ impl Bot {
         self.spawn_vocab_extraction(
             &sender.phone,
             text,
-            learning_language,
-            partner_learning_language,
+            active_language,
+            &other_language,
             &partner.phone,
             conversation.id,
         );

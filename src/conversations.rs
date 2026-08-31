@@ -109,14 +109,26 @@ pub async fn format_menu_body(db: &Db, phone: &str) -> anyhow::Result<String> {
 }
 
 fn format_listing_status(listing: &ConversationListing) -> String {
-    let mut tags = Vec::new();
+    let mut tags: Vec<String> = Vec::new();
     if listing.is_active {
-        tags.push("active");
+        tags.push("active".into());
     }
     if listing.is_pending {
-        tags.push("waiting for partner");
+        tags.push("waiting for partner".into());
+    } else if listing.mode == ConversationMode::ExchangeTurns {
+        if let Some(language) = &listing.exchange_active_language {
+            match listing.turn {
+                Some(crate::db::ConversationTurnStatus::YourTurnToSend) => {
+                    tags.push(format!("your turn — write in {language}"));
+                }
+                Some(crate::db::ConversationTurnStatus::WaitingForMessage) => {
+                    tags.push(format!("waiting — current language: {language}"));
+                }
+                _ => tags.push(format!("current language: {language}")),
+            }
+        }
     } else if let Some(turn) = listing.turn {
-        tags.push(turn.label());
+        tags.push(turn.label().into());
     }
     if tags.is_empty() {
         String::new()
@@ -141,7 +153,15 @@ fn format_exchange_role_desc(listing: &ConversationListing, turns: bool) -> Stri
     } else {
         "Exchange"
     };
-    format!("{label} — you learn {your_language}, partner learns {partner_language}")
+    if turns {
+        format!(
+            "{label} — you learn {your_language}, partner learns {partner_language}; alternate languages each round"
+        )
+    } else {
+        format!(
+            "{label} — you learn {your_language}, partner learns {partner_language}; always write in your language"
+        )
+    }
 }
 
 pub fn format_listing_line(
@@ -390,7 +410,8 @@ pub async fn handle_set_mode(
                             phone,
                             &format!(
                                 "Switched to turn-based exchange with {partner_label}. \
-                                 You learn {your_language} — write in that language on your turn."
+                                 You learn {your_language}, they learn {partner_language}. \
+                                 Take turns — both write in one language, then both write in the other."
                             ),
                         )
                         .await?;
@@ -400,8 +421,8 @@ pub async fn handle_set_mode(
                             &partner.phone,
                             &format!(
                                 "{your_label} switched this chat to turn-based exchange. \
-                                 You learn {partner_language} — write in that language on your turn.\n\n\
-                                 {your_label} goes first."
+                                 You learn {partner_language}, they learn {your_language}. \
+                                 Take turns in the shared language each round — you go first."
                             ),
                         )
                         .await?;

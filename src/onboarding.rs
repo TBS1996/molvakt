@@ -92,11 +92,11 @@ pub async fn start_new_exchange_conversation(
     let prompt = match mode {
         ConversationMode::ExchangeTurns => {
             "Send your exchange partner's phone number with country code (e.g. +4791234567).\n\n\
-             You'll take turns — one message each, always in your own learning language."
+             You'll take turns — both write in one language, then both write in the other."
         }
         ConversationMode::Exchange => {
             "Send your exchange partner's phone number with country code (e.g. +4791234567).\n\n\
-             You'll each write in the language you're learning."
+             You'll each always write in the language you're learning."
         }
         ConversationMode::Tutor => unreachable!(),
     };
@@ -572,8 +572,13 @@ async fn accept_exchange_invite(
         .await?;
 
     if conversation.mode == ConversationMode::ExchangeTurns {
-        db.init_exchange_turn_state(invite.conversation_id, &invite.inviter_phone)
-            .await?;
+        db.init_exchange_round_state(
+            invite.conversation_id,
+            &invite.inviter_phone,
+            &conversation.target_language,
+            true,
+        )
+        .await?;
     }
 
     let inviter_name = db.get_display_name(&invite.inviter_phone).await?;
@@ -584,14 +589,19 @@ async fn accept_exchange_invite(
     let (invitee_message, inviter_message) = match conversation.mode {
         ConversationMode::ExchangeTurns => (
             format!(
-                "You're connected! Turn-based exchange — you learn {}. \
-                 Write in that language on your turn.\n\n\
-                 {inviter_label} goes first.",
-                conversation.source_language
+                "You're connected! You'll take turns writing in the same language — \
+                 first both write in {}, then both write in {}.\n\n\
+                 {inviter_label} goes first in {}.",
+                conversation.target_language,
+                conversation.source_language,
+                conversation.target_language
             ),
             format!(
-                "You're connected to {invitee_label}! Turn-based exchange — you learn {}. \
-                 Write in that language on your turn. You go first.",
+                "You're connected to {invitee_label}! You'll take turns writing in the same language — \
+                 first both write in {}, then both write in {}.\n\n\
+                 You go first in {}.",
+                conversation.target_language,
+                conversation.source_language,
                 conversation.target_language
             ),
         ),
@@ -703,16 +713,16 @@ fn mode_menu_rows() -> [(&'static str, &'static str, &'static str); 4] {
             "Teacher",
             "Teach your language to someone practicing",
         ),
-        (
-            MODE_EXCHANGE,
-            "Exchange",
-            "Write in your learning language anytime",
-        ),
-        (
-            MODE_EXCHANGE_TURNS,
-            "Exchange (turns)",
-            "Take turns, one message each",
-        ),
+                (
+                    MODE_EXCHANGE,
+                    "Exchange",
+                    "Write anytime in your learning language",
+                ),
+                (
+                    MODE_EXCHANGE_TURNS,
+                    "Exchange (turns)",
+                    "Take turns; alternate languages each round",
+                ),
     ]
 }
 

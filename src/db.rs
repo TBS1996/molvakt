@@ -20,6 +20,32 @@ pub struct Conversation {
     pub target_language: String,
     pub source_language: String,
     pub exchange_turn_phone: Option<String>,
+    pub exchange_active_language: Option<String>,
+    pub exchange_round_messages: i32,
+    pub exchange_round_starter_phone: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExchangeAdvance {
+    pub active_language: String,
+    pub flipped_language: bool,
+    pub next_turn_phone: Option<String>,
+}
+
+impl Conversation {
+    pub fn exchange_active_language(&self) -> &str {
+        self.exchange_active_language
+            .as_deref()
+            .unwrap_or(&self.target_language)
+    }
+
+    pub fn other_exchange_language(&self, language: &str) -> String {
+        if language == self.target_language {
+            self.source_language.clone()
+        } else {
+            self.target_language.clone()
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +100,7 @@ pub struct ConversationListing {
     pub is_active: bool,
     pub is_pending: bool,
     pub turn: Option<ConversationTurnStatus>,
+    pub exchange_active_language: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -370,6 +397,9 @@ impl Db {
             target_language: target_language.to_string(),
             source_language: source_language.to_string(),
             exchange_turn_phone: None,
+            exchange_active_language: None,
+            exchange_round_messages: 0,
+            exchange_round_starter_phone: None,
         })
     }
 
@@ -462,7 +492,8 @@ impl Db {
 
     pub async fn get_conversation(&self, conversation_id: i64) -> anyhow::Result<Conversation> {
         let row = sqlx::query(
-            "SELECT id, mode, target_language, source_language, exchange_turn_phone
+            "SELECT id, mode, target_language, source_language, exchange_turn_phone,
+                    exchange_active_language, exchange_round_messages, exchange_round_starter_phone
              FROM conversations WHERE id = ?",
         )
         .bind(conversation_id)
@@ -475,6 +506,9 @@ impl Db {
             target_language: row.get("target_language"),
             source_language: row.get("source_language"),
             exchange_turn_phone: row.get("exchange_turn_phone"),
+            exchange_active_language: row.get("exchange_active_language"),
+            exchange_round_messages: row.get("exchange_round_messages"),
+            exchange_round_starter_phone: row.get("exchange_round_starter_phone"),
         })
     }
 
@@ -637,6 +671,17 @@ impl Db {
                 )
             };
 
+            let exchange_active_language = if conversation.mode == ConversationMode::ExchangeTurns {
+                Some(
+                    conversation
+                        .exchange_active_language
+                        .clone()
+                        .unwrap_or_else(|| conversation.target_language.clone()),
+                )
+            } else {
+                None
+            };
+
             listings.push(ConversationListing {
                 conversation_id: participant.conversation_id,
                 mode: conversation.mode,
@@ -649,6 +694,7 @@ impl Db {
                 is_active: active_id == Some(participant.conversation_id),
                 is_pending,
                 turn,
+                exchange_active_language,
             });
         }
 
@@ -679,34 +725,146 @@ impl Db {
         }
     }
 
-    pub async fn init_exchange_turn_state(
+    pub async fn init_exchange_round_state(
         &self,
         conversation_id: i64,
-        first_turn_phone: &str,
+        starter_phone: &str,
+        initial_language: &str,
+        strict_turns: bool,
     ) -> anyhow::Result<()> {
-        let phone = normalize_phone(first_turn_phone);
+        let phone = normalize_phone(starter_phone);
+        let turn_phone = if strict_turns {
+            Some(phone.clone())
+        } else {
+            None
+        };
         sqlx::query(
             "UPDATE conversations
-             SET exchange_turn_phone = ?, exchange_awaiting_reply = 0
+             SET exchange_active_language = ?,
+                 exchange_round_messages = 0,
+                 exchange_round_starter_phone = ?,
+                 exchange_turn_phone = ?,
+                 exchange_awaiting_reply = 0
              WHERE id = ?",
         )
+        .bind(initial_language)
         .bind(&phone)
+        .bind(turn_phone)
         .bind(conversation_id)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
+    pub async fn init_exchange_turn_state(
+        &self,
+        conversation_id: i64,
+        first_turn_phone: &str,
+        initial_language: &str,
+    ) -> anyhow::Result<()> {
+        self.init_exchange_round_state(conversation_id, first_turn_phone, initial_language, true)
+            .await
+    }
+
     pub async fn clear_exchange_turn_state(&self, conversation_id: i64) -> anyhow::Result<()> {
         sqlx::query(
             "UPDATE conversations
-             SET exchange_turn_phone = NULL, exchange_awaiting_reply = 0
+             SET exchange_turn_phone = NULL,
+                 exchange_active_language = NULL,
+                 exchange_round_messages = 0,
+                 exchange_round_starter_phone = NULL,
+                 exchange_awaiting_reply = 0
              WHERE id = ?",
         )
         .bind(conversation_id)
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    pub async fn ensure_exchange_round_initialized(
+        &self,
+        conversation: &Conversation,
+        starter_phone: &str,
+    ) -> anyhow::Result<()> {
+        if conversation.exchange_active_language.is_some() {
+            return Ok(());
+        }
+
+        let initial_language = conversation.target_language.clone();
+        let strict_turns = conversation.mode == ConversationMode::ExchangeTurns;
+        self.init_exchange_round_state(
+            conversation.id,
+            starter_phone,
+            &initial_language,
+            strict_turns,
+        )
+        .await
+    }
+
+    pub async fn advance_exchange_after_message(
+        &self,
+        conversation_id: i64,
+        conversation: &Conversation,
+        sender_phone: &str,
+        partner_phone: &str,
+        strict_turns: bool,
+    ) -> anyhow::Result<ExchangeAdvance> {
+        let active_language = conversation.exchange_active_language().to_string();
+        let round_messages = conversation.exchange_round_messages + 1;
+
+        if round_messages < 2 {
+            let next_turn = if strict_turns {
+                Some(normalize_phone(partner_phone))
+            } else {
+                None
+            };
+            sqlx::query(
+                "UPDATE conversations
+                 SET exchange_round_messages = ?, exchange_turn_phone = ?
+                 WHERE id = ?",
+            )
+            .bind(round_messages)
+            .bind(&next_turn)
+            .bind(conversation_id)
+            .execute(&self.pool)
+            .await?;
+
+            return Ok(ExchangeAdvance {
+                active_language,
+                flipped_language: false,
+                next_turn_phone: next_turn,
+            });
+        }
+
+        let new_language = conversation.other_exchange_language(&active_language);
+        let new_starter = normalize_phone(sender_phone);
+        let next_turn = if strict_turns {
+            Some(new_starter.clone())
+        } else {
+            None
+        };
+
+        sqlx::query(
+            "UPDATE conversations
+             SET exchange_active_language = ?,
+                 exchange_round_messages = 0,
+                 exchange_round_starter_phone = ?,
+                 exchange_turn_phone = ?
+             WHERE id = ?",
+        )
+        .bind(&new_language)
+        .bind(&new_starter)
+        .bind(&next_turn)
+        .bind(conversation_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(ExchangeAdvance {
+            active_language: new_language,
+            flipped_language: true,
+            next_turn_phone: next_turn,
+        })
     }
 
     pub async fn pass_exchange_turn(
@@ -840,7 +998,12 @@ impl Db {
 
                 sqlx::query(
                     "UPDATE conversations
-                     SET mode = 'exchange', exchange_turn_phone = NULL, exchange_awaiting_reply = 0
+                     SET mode = 'exchange',
+                         exchange_turn_phone = NULL,
+                         exchange_active_language = NULL,
+                         exchange_round_messages = 0,
+                         exchange_round_starter_phone = NULL,
+                         exchange_awaiting_reply = 0
                      WHERE id = ?",
                 )
                 .bind(conversation_id)
@@ -873,7 +1036,23 @@ impl Db {
                     .bind(conversation_id)
                     .execute(&self.pool)
                     .await?;
-                self.init_exchange_turn_state(conversation_id, &phone).await?;
+
+                let requester = self
+                    .find_participant_in_conversation(&phone, conversation_id)
+                    .await?
+                    .context("requester missing when switching to exchange turns")
+                    .map_err(|_| SetModeError::NotComplete)?;
+                let initial_language = requester
+                    .learning_language
+                    .as_deref()
+                    .unwrap_or(&conversation.target_language);
+                self.init_exchange_round_state(
+                    conversation_id,
+                    &phone,
+                    initial_language,
+                    true,
+                )
+                .await?;
             }
             ConversationModeSetting::Teacher | ConversationModeSetting::Learner => {
                 let desired_role = match setting {

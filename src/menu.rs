@@ -244,8 +244,8 @@ async fn send_mode_menu(whatsapp: &WhatsApp, phone: &str, partner: &str) -> anyh
             &[
                 (MODE_LEARNER, "Learner", "You practice, partner teaches"),
                 (MODE_TEACHER, "Teacher", "You teach, partner practices"),
-                (MODE_EXCHANGE, "Exchange", "Write anytime in your language"),
-                (MODE_TURNS, "Exchange (turns)", "Take turns, one message each"),
+                (MODE_EXCHANGE, "Exchange", "Write in your learning language"),
+                (MODE_TURNS, "Exchange (turns)", "Alternate languages each round"),
             ],
         )
         .await
