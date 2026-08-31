@@ -27,6 +27,28 @@ fn format_listing_status(listing: &crate::db::ConversationListing) -> String {
     }
 }
 
+fn format_exchange_role_desc(
+    listing: &crate::db::ConversationListing,
+    turns: bool,
+) -> String {
+    let your_language = listing
+        .learning_language
+        .as_deref()
+        .map(format_language_name)
+        .unwrap_or_else(|| "unknown".into());
+    let partner_language = listing
+        .partner_learning_language
+        .as_deref()
+        .map(format_language_name)
+        .unwrap_or_else(|| "?".into());
+    let label = if turns {
+        "Exchange (turns)"
+    } else {
+        "Exchange"
+    };
+    format!("{label} — you learn {your_language}, partner learns {partner_language}")
+}
+
 fn format_listing_line(
     index: usize,
     listing: &crate::db::ConversationListing,
@@ -45,17 +67,9 @@ fn format_listing_line(
         .is_some_and(|partner| phones_match(partner, viewer_phone));
 
     let role_desc = if listing.mode == ConversationMode::Exchange {
-        let your_language = listing
-            .learning_language
-            .as_deref()
-            .map(format_language_name)
-            .unwrap_or_else(|| "unknown".into());
-        let partner_language = listing
-            .partner_learning_language
-            .as_deref()
-            .map(format_language_name)
-            .unwrap_or_else(|| "?".into());
-        format!("Exchange — you learn {your_language}, partner learns {partner_language}")
+        format_exchange_role_desc(listing, false)
+    } else if listing.mode == ConversationMode::ExchangeTurns {
+        format_exchange_role_desc(listing, true)
     } else {
         match listing.role {
             crate::db::ParticipantRole::Teacher => format!("You teach {language}"),
@@ -109,7 +123,9 @@ pub async fn handle_list(db: &Db, whatsapp: &WhatsApp, phone: &str) -> anyhow::R
 
     lines.push(String::new());
     lines.push("Reply SWITCH <number> to change conversation.".into());
-    lines.push("Reply SET MODE <number> teacher|learner|exchange to change mode.".into());
+    lines.push(
+        "Reply SET MODE <number> teacher|learner|exchange|exchange-turns to change mode.".into(),
+    );
     lines.push("Reply CANCEL <number> to remove a pending invite.".into());
     lines.push("Reply SET LANGUAGE <name> to fix the language on the active conversation.".into());
     lines.push("Reply SET <number> <language> to fix a specific one.".into());
@@ -180,7 +196,14 @@ pub async fn handle_switch(
             .as_deref()
             .map(format_language_name)
             .unwrap_or_else(|| "unknown".into());
-        format!("Exchange — you learn {your_language}")
+        format!("Exchange — you learn {your_language} (write in that language)")
+    } else if listing.mode == ConversationMode::ExchangeTurns {
+        let your_language = listing
+            .learning_language
+            .as_deref()
+            .map(format_language_name)
+            .unwrap_or_else(|| "unknown".into());
+        format!("Exchange (turns) — you learn {your_language}")
     } else {
         match listing.role {
             crate::db::ParticipantRole::Teacher => format!("You teach {language}"),
@@ -292,7 +315,7 @@ pub async fn handle_set_mode(
                             phone,
                             &format!(
                                 "Switched to exchange mode with {partner_label}. \
-                                 You learn {your_language} — write in that language."
+                                 You learn {your_language} — always write in that language."
                             ),
                         )
                         .await?;
@@ -302,7 +325,43 @@ pub async fn handle_set_mode(
                             &partner.phone,
                             &format!(
                                 "{your_label} switched this chat to exchange mode. \
-                                 You learn {partner_language} — write in that language."
+                                 You learn {partner_language} — always write in that language."
+                            ),
+                        )
+                        .await?;
+                }
+                ConversationModeSetting::ExchangeTurns => {
+                    let your_language = you
+                        .learning_language
+                        .as_deref()
+                        .map(format_language_name)
+                        .unwrap_or_else(|| "not set".into());
+                    let partner_language = partner
+                        .learning_language
+                        .as_deref()
+                        .map(format_language_name)
+                        .unwrap_or_else(|| "not set".into());
+
+                    whatsapp
+                        .send_text(
+                            phone,
+                            &format!(
+                                "Switched to turn-based exchange with {partner_label}. \
+                                 You learn {your_language}.\n\n\
+                                 On your turn, write in {your_language}. \
+                                 When replying, write in your partner's language."
+                            ),
+                        )
+                        .await?;
+
+                    whatsapp
+                        .send_text(
+                            &partner.phone,
+                            &format!(
+                                "{your_label} switched this chat to turn-based exchange. \
+                                 You learn {partner_language}.\n\n\
+                                 {your_label} goes first — wait for their message, \
+                                 then reply in {your_language}."
                             ),
                         )
                         .await?;
@@ -425,7 +484,7 @@ pub async fn handle_set_language(
         return Ok(());
     }
 
-    let (conversation_id, is_exchange) = if let Some(index) = command.index {
+    let (conversation_id, per_participant_language) = if let Some(index) = command.index {
         let Some(listing) = listings.get(index.saturating_sub(1)) else {
             whatsapp
                 .send_text(
@@ -438,11 +497,17 @@ pub async fn handle_set_language(
                 .await?;
             return Ok(());
         };
-        (listing.conversation_id, listing.mode == ConversationMode::Exchange)
+        (
+            listing.conversation_id,
+            listing.mode.is_exchange(),
+        )
     } else if let Some(listing) = listings.iter().find(|listing| listing.is_active) {
-        (listing.conversation_id, listing.mode == ConversationMode::Exchange)
+        (listing.conversation_id, listing.mode.is_exchange())
     } else if listings.len() == 1 {
-        (listings[0].conversation_id, listings[0].mode == ConversationMode::Exchange)
+        (
+            listings[0].conversation_id,
+            listings[0].mode.is_exchange(),
+        )
     } else {
         whatsapp
             .send_text(
@@ -454,7 +519,7 @@ pub async fn handle_set_language(
         return Ok(());
     };
 
-    if is_exchange {
+    if per_participant_language {
         db.update_learning_language(conversation_id, phone, &command.language)
             .await?;
     } else {
@@ -478,7 +543,7 @@ pub async fn handle_help(whatsapp: &WhatsApp, phone: &str) -> anyhow::Result<()>
             "molvakt commands:\n\n\
              LIST — show your conversations\n\
              SWITCH <number> — change active conversation\n\
-             SET MODE <number> teacher|learner|exchange — change conversation mode\n\
+             SET MODE <number> teacher|learner|exchange|exchange-turns — change conversation mode\n\
              CANCEL <number> — cancel a pending invite\n\
              SET LANGUAGE <name> — fix language on active conversation\n\
              SET <number> <language> — fix language on a specific one\n\
@@ -534,6 +599,7 @@ pub fn parse_set_mode(text: &str) -> Option<SetModeCommand> {
         "teacher" => ConversationModeSetting::Teacher,
         "learner" => ConversationModeSetting::Learner,
         "exchange" => ConversationModeSetting::Exchange,
+        "exchange-turns" | "exchange_turns" | "turns" => ConversationModeSetting::ExchangeTurns,
         _ => return None,
     };
 

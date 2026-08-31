@@ -19,12 +19,15 @@ pub struct Conversation {
     pub mode: ConversationMode,
     pub target_language: String,
     pub source_language: String,
+    pub exchange_turn_phone: Option<String>,
+    pub exchange_awaiting_reply: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConversationMode {
     Tutor,
     Exchange,
+    ExchangeTurns,
 }
 
 impl ConversationMode {
@@ -32,6 +35,7 @@ impl ConversationMode {
         match self {
             Self::Tutor => "tutor",
             Self::Exchange => "exchange",
+            Self::ExchangeTurns => "exchange_turns",
         }
     }
 
@@ -39,8 +43,13 @@ impl ConversationMode {
         match mode {
             "tutor" => Ok(Self::Tutor),
             "exchange" => Ok(Self::Exchange),
+            "exchange_turns" => Ok(Self::ExchangeTurns),
             other => anyhow::bail!("unknown conversation mode: {other}"),
         }
+    }
+
+    pub fn is_exchange(self) -> bool {
+        matches!(self, Self::Exchange | Self::ExchangeTurns)
     }
 }
 
@@ -91,6 +100,7 @@ pub enum ConversationModeSetting {
     Teacher,
     Learner,
     Exchange,
+    ExchangeTurns,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,6 +307,8 @@ impl Db {
             mode,
             target_language: target_language.to_string(),
             source_language: source_language.to_string(),
+            exchange_turn_phone: None,
+            exchange_awaiting_reply: false,
         })
     }
 
@@ -309,7 +321,7 @@ impl Db {
         .fetch_all(&self.pool)
         .await?;
 
-        if conversation.mode == ConversationMode::Exchange {
+        if conversation.mode.is_exchange() {
             let participants = self
                 .find_participants_in_conversation(conversation_id)
                 .await?;
@@ -389,7 +401,8 @@ impl Db {
 
     pub async fn get_conversation(&self, conversation_id: i64) -> anyhow::Result<Conversation> {
         let row = sqlx::query(
-            "SELECT id, mode, target_language, source_language FROM conversations WHERE id = ?",
+            "SELECT id, mode, target_language, source_language, exchange_turn_phone, exchange_awaiting_reply
+             FROM conversations WHERE id = ?",
         )
         .bind(conversation_id)
         .fetch_one(&self.pool)
@@ -400,6 +413,8 @@ impl Db {
             mode: ConversationMode::from_str(row.get::<String, _>("mode").as_str())?,
             target_language: row.get("target_language"),
             source_language: row.get("source_language"),
+            exchange_turn_phone: row.get("exchange_turn_phone"),
+            exchange_awaiting_reply: row.get::<i64, _>("exchange_awaiting_reply") != 0,
         })
     }
 
@@ -540,6 +555,19 @@ impl Db {
 
             let turn = if is_pending {
                 None
+            } else if conversation.mode == ConversationMode::ExchangeTurns {
+                if self.exchange_is_ready(participant.conversation_id).await? {
+                    Some(
+                        self.turn_status_for_exchange_turns(
+                            &conversation,
+                            &participant,
+                            partner_phone.as_deref(),
+                        )
+                        .await?,
+                    )
+                } else {
+                    Some(ConversationTurnStatus::WaitingForMessage)
+                }
             } else if conversation.mode == ConversationMode::Exchange {
                 if self.exchange_is_ready(participant.conversation_id).await? {
                     Some(ConversationTurnStatus::YourTurnToSend)
@@ -577,6 +605,115 @@ impl Db {
         });
 
         Ok(listings)
+    }
+
+    pub async fn turn_status_for_exchange_turns(
+        &self,
+        conversation: &Conversation,
+        participant: &Participant,
+        _partner_phone: Option<&str>,
+    ) -> anyhow::Result<ConversationTurnStatus> {
+        let Some(prompt_phone) = conversation.exchange_turn_phone.as_deref() else {
+            return Ok(ConversationTurnStatus::YourTurnToSend);
+        };
+
+        let is_prompter = participant.phone == prompt_phone;
+        if conversation.exchange_awaiting_reply {
+            if is_prompter {
+                Ok(ConversationTurnStatus::WaitingForReply)
+            } else {
+                Ok(ConversationTurnStatus::YourTurnToReply)
+            }
+        } else if is_prompter {
+            Ok(ConversationTurnStatus::YourTurnToSend)
+        } else {
+            Ok(ConversationTurnStatus::WaitingForMessage)
+        }
+    }
+
+    pub async fn init_exchange_turn_state(
+        &self,
+        conversation_id: i64,
+        first_turn_phone: &str,
+    ) -> anyhow::Result<()> {
+        let phone = normalize_phone(first_turn_phone);
+        sqlx::query(
+            "UPDATE conversations
+             SET exchange_turn_phone = ?, exchange_awaiting_reply = 0
+             WHERE id = ?",
+        )
+        .bind(&phone)
+        .bind(conversation_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn clear_exchange_turn_state(&self, conversation_id: i64) -> anyhow::Result<()> {
+        sqlx::query(
+            "UPDATE conversations
+             SET exchange_turn_phone = NULL, exchange_awaiting_reply = 0
+             WHERE id = ?",
+        )
+        .bind(conversation_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn mark_exchange_awaiting_reply(&self, conversation_id: i64) -> anyhow::Result<()> {
+        sqlx::query("UPDATE conversations SET exchange_awaiting_reply = 1 WHERE id = ?")
+            .bind(conversation_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn complete_exchange_reply(
+        &self,
+        conversation_id: i64,
+        replier_phone: &str,
+    ) -> anyhow::Result<()> {
+        let phone = normalize_phone(replier_phone);
+        sqlx::query(
+            "UPDATE conversations
+             SET exchange_turn_phone = ?, exchange_awaiting_reply = 0
+             WHERE id = ?",
+        )
+        .bind(&phone)
+        .bind(conversation_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn assign_default_exchange_learning_languages(
+        &self,
+        conversation_id: i64,
+        conversation: &Conversation,
+        participants: &[Participant],
+    ) -> anyhow::Result<()> {
+        for participant in participants {
+            if participant.role == ParticipantRole::Learner && participant.learning_language.is_none()
+            {
+                self.update_learning_language(
+                    conversation_id,
+                    &participant.phone,
+                    &conversation.target_language,
+                )
+                .await?;
+            }
+            if participant.role == ParticipantRole::Teacher && participant.learning_language.is_none()
+            {
+                self.update_learning_language(
+                    conversation_id,
+                    &participant.phone,
+                    &conversation.source_language,
+                )
+                .await?;
+            }
+        }
+        Ok(())
     }
 
     pub async fn turn_status_for_participant(
@@ -642,6 +779,10 @@ impl Db {
             }
         }
 
+        if conversation.mode == ConversationMode::ExchangeTurns && conversation.exchange_awaiting_reply {
+            return Err(SetModeError::ActiveExchange.into());
+        }
+
         match setting {
             ConversationModeSetting::Exchange => {
                 if conversation.mode == ConversationMode::Exchange {
@@ -658,42 +799,60 @@ impl Db {
                     return Ok((requester, partner));
                 }
 
-                for participant in &participants {
-                    if participant.role == ParticipantRole::Learner
-                        && participant.learning_language.is_none()
-                    {
-                        self.update_learning_language(
-                            conversation_id,
-                            &participant.phone,
-                            &conversation.target_language,
-                        )
-                        .await?;
-                    }
-                    if participant.role == ParticipantRole::Teacher
-                        && participant.learning_language.is_none()
-                    {
-                        self.update_learning_language(
-                            conversation_id,
-                            &participant.phone,
-                            &conversation.source_language,
-                        )
-                        .await?;
-                    }
+                self.assign_default_exchange_learning_languages(
+                    conversation_id,
+                    &conversation,
+                    &participants,
+                )
+                .await?;
+
+                sqlx::query(
+                    "UPDATE conversations
+                     SET mode = 'exchange', exchange_turn_phone = NULL, exchange_awaiting_reply = 0
+                     WHERE id = ?",
+                )
+                .bind(conversation_id)
+                .execute(&self.pool)
+                .await?;
+            }
+            ConversationModeSetting::ExchangeTurns => {
+                if conversation.mode == ConversationMode::ExchangeTurns {
+                    let requester = self
+                        .find_participant_in_conversation(&phone, conversation_id)
+                        .await?
+                        .context("requester missing in exchange turns conversation")
+                        .map_err(|_| SetModeError::NotComplete)?;
+                    let partner = self
+                        .find_partner_participant(conversation_id, &phone)
+                        .await?
+                        .context("partner missing in exchange turns conversation")
+                        .map_err(|_| SetModeError::NotComplete)?;
+                    return Ok((requester, partner));
                 }
 
-                sqlx::query("UPDATE conversations SET mode = 'exchange' WHERE id = ?")
+                self.assign_default_exchange_learning_languages(
+                    conversation_id,
+                    &conversation,
+                    &participants,
+                )
+                .await?;
+
+                sqlx::query("UPDATE conversations SET mode = 'exchange_turns' WHERE id = ?")
                     .bind(conversation_id)
                     .execute(&self.pool)
                     .await?;
+                self.init_exchange_turn_state(conversation_id, &phone).await?;
             }
             ConversationModeSetting::Teacher | ConversationModeSetting::Learner => {
                 let desired_role = match setting {
                     ConversationModeSetting::Teacher => ParticipantRole::Teacher,
                     ConversationModeSetting::Learner => ParticipantRole::Learner,
-                    ConversationModeSetting::Exchange => unreachable!(),
+                    ConversationModeSetting::Exchange | ConversationModeSetting::ExchangeTurns => {
+                        unreachable!()
+                    }
                 };
 
-                if conversation.mode == ConversationMode::Exchange {
+                if conversation.mode.is_exchange() {
                     let requester = participants
                         .iter()
                         .find(|participant| participant.phone == phone)
@@ -719,7 +878,9 @@ impl Db {
                     };
 
                     sqlx::query(
-                        "UPDATE conversations SET mode = 'tutor', target_language = ? WHERE id = ?",
+                        "UPDATE conversations
+                         SET mode = 'tutor', target_language = ?, exchange_turn_phone = NULL, exchange_awaiting_reply = 0
+                         WHERE id = ?",
                     )
                     .bind(&target_language)
                     .bind(conversation_id)

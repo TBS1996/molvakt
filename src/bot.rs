@@ -150,7 +150,12 @@ impl Bot {
                 let conversation = self.db.get_conversation(participant.conversation_id).await?;
                 if conversation.mode == ConversationMode::Exchange {
                     return self
-                        .handle_exchange_message(&participant, text, &conversation)
+                        .handle_parallel_exchange_message(&participant, text, &conversation)
+                        .await;
+                }
+                if conversation.mode == ConversationMode::ExchangeTurns {
+                    return self
+                        .handle_exchange_turns_message(&participant, text, &conversation)
                         .await;
                 }
                 match participant.role {
@@ -300,7 +305,7 @@ impl Bot {
         Ok(())
     }
 
-    async fn handle_exchange_message(
+    async fn handle_parallel_exchange_message(
         &self,
         sender: &Participant,
         text: &str,
@@ -364,6 +369,151 @@ impl Bot {
                 ),
             )
             .await?;
+
+        Ok(())
+    }
+
+    async fn handle_exchange_turns_message(
+        &self,
+        sender: &Participant,
+        text: &str,
+        conversation: &Conversation,
+    ) -> anyhow::Result<()> {
+        let partner = self
+            .db
+            .find_partner_participant(conversation.id, &sender.phone)
+            .await?
+            .context("no exchange partner registered yet")?;
+        let prompt_phone = conversation
+            .exchange_turn_phone
+            .as_deref()
+            .context("exchange turns not initialized")?;
+        let awaiting_reply = conversation.exchange_awaiting_reply;
+        let is_prompter = sender.phone == prompt_phone;
+
+        let prompt_holder = if is_prompter {
+            sender
+        } else if partner.phone == prompt_phone {
+            &partner
+        } else {
+            anyhow::bail!("invalid exchange turn state");
+        };
+        let replier = if prompt_holder.phone == sender.phone {
+            &partner
+        } else {
+            sender
+        };
+
+        let prompt_language = prompt_holder
+            .learning_language
+            .as_deref()
+            .unwrap_or(&conversation.target_language);
+        let replier_learning_language = replier
+            .learning_language
+            .as_deref()
+            .unwrap_or(&conversation.source_language);
+
+        if awaiting_reply {
+            if is_prompter {
+                let partner_name = self.db.get_display_name(&partner.phone).await?;
+                self.whatsapp
+                    .send_text(
+                        &sender.phone,
+                        &format!(
+                            "Waiting for {} to reply in {prompt_language}.",
+                            contact_label(&partner.phone, partner_name.as_deref())
+                        ),
+                    )
+                    .await?;
+                return Ok(());
+            }
+        } else if !is_prompter {
+            let holder_name = self.db.get_display_name(&prompt_holder.phone).await?;
+            self.whatsapp
+                .send_text(
+                    &sender.phone,
+                    &format!(
+                        "It's {}'s turn to write in {prompt_language}.",
+                        contact_label(&prompt_holder.phone, holder_name.as_deref())
+                    ),
+                )
+                .await?;
+            return Ok(());
+        }
+
+        let (expected_language, partner_context_language) = (prompt_language, replier_learning_language);
+
+        let history = self.db.load_history(conversation.id).await?;
+        let llm = Llm::for_exchange(expected_language, partner_context_language)?;
+        let judgment = llm.validate_reply(text, &history).await?;
+        if !judgment.accepted {
+            self.whatsapp
+                .send_text(&sender.phone, &judgment.feedback)
+                .await?;
+            return Ok(());
+        }
+
+        self.db
+            .insert_exchange_message(conversation.id, sender, text)
+            .await?;
+
+        let sender_name = self.db.get_display_name(&sender.phone).await?;
+        let sender_label = contact_label(&sender.phone, sender_name.as_deref());
+        let partner_name = self.db.get_display_name(&partner.phone).await?;
+        let partner_label = contact_label(&partner.phone, partner_name.as_deref());
+
+        if awaiting_reply {
+            self.db
+                .complete_exchange_reply(conversation.id, &sender.phone)
+                .await?;
+
+            let your_language = sender
+                .learning_language
+                .as_deref()
+                .unwrap_or(&conversation.target_language);
+            self.whatsapp
+                .send_text(
+                    &partner.phone,
+                    &format!("[{sender_label}]: {text}\n\nYour turn — write in {your_language}."),
+                )
+                .await?;
+            self.whatsapp
+                .send_text(
+                    &sender.phone,
+                    &format!("Reply sent to {partner_label}."),
+                )
+                .await?;
+        } else {
+            self.db
+                .mark_exchange_awaiting_reply(conversation.id)
+                .await?;
+
+            let mut outgoing = format!(
+                "[{sender_label}]: {text}\n\nReply in {prompt_language}."
+            );
+            let previous_active = self
+                .db
+                .get_active_conversation_id(&partner.phone)
+                .await?;
+            if previous_active.is_some() && previous_active != Some(conversation.id) {
+                outgoing.push_str(&format!(
+                    "\n\n(Switched active chat to exchange (turns) with {sender_label}.)"
+                ));
+            }
+            self.db
+                .set_active_conversation(&partner.phone, conversation.id)
+                .await?;
+
+            self.whatsapp.send_text(&partner.phone, &outgoing).await?;
+            self.whatsapp
+                .send_text(
+                    &sender.phone,
+                    &format!(
+                        "Message sent to {partner_label}. Waiting for their reply in {prompt_language}."
+                    ),
+                )
+                .await?;
+        }
 
         Ok(())
     }
