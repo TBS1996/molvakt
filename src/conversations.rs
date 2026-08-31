@@ -1,5 +1,5 @@
 use crate::db::Db;
-use crate::phone::{display_phone, looks_like_phone, normalize_phone, phones_match};
+use crate::phone::{contact_label, looks_like_phone, normalize_phone, phones_match};
 use crate::whatsapp::WhatsApp;
 
 fn format_language_name(language: &str) -> String {
@@ -19,7 +19,7 @@ fn format_listing_line(
     let partner = listing
         .partner_phone
         .as_deref()
-        .map(display_phone)
+        .map(|phone| contact_label(phone, listing.partner_display_name.as_deref()))
         .unwrap_or_else(|| "unknown".into());
 
     let broken = listing
@@ -132,7 +132,7 @@ pub async fn handle_switch(
     let partner = listing
         .partner_phone
         .as_deref()
-        .map(display_phone)
+        .map(|phone| contact_label(phone, listing.partner_display_name.as_deref()))
         .unwrap_or_else(|| "your partner".into());
     let role_desc = match listing.role {
         crate::db::ParticipantRole::Teacher => format!("You teach {language}"),

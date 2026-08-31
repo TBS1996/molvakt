@@ -10,6 +10,13 @@ pub struct WhatsApp {
     phone_number_id: String,
 }
 
+#[derive(Debug)]
+pub struct ParsedIncomingMessage {
+    pub from: String,
+    pub text: String,
+    pub profile_name: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct WebhookPayload {
     pub entry: Option<Vec<WebhookEntry>>,
@@ -25,9 +32,21 @@ pub struct WebhookChange {
     pub value: Option<WebhookValue>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct WebhookValue {
     pub messages: Option<Vec<IncomingMessage>>,
+    pub contacts: Option<Vec<WebhookContact>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WebhookContact {
+    pub wa_id: String,
+    pub profile: WebhookProfile,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WebhookProfile {
+    pub name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,15 +93,27 @@ impl WhatsApp {
         })
     }
 
-    pub fn parse_incoming_messages(body: &str) -> anyhow::Result<Vec<(String, String)>> {
+    pub fn parse_incoming_messages(body: &str) -> anyhow::Result<Vec<ParsedIncomingMessage>> {
         let payload: WebhookPayload = serde_json::from_str(body).context("invalid webhook json")?;
         let mut messages = Vec::new();
 
         for entry in payload.entry.unwrap_or_default() {
             for change in entry.changes.unwrap_or_default() {
-                for message in change.value.and_then(|v| v.messages).unwrap_or_default() {
+                let value = change.value.unwrap_or_default();
+                let contacts = value.contacts.unwrap_or_default();
+                for message in value.messages.unwrap_or_default() {
                     if let Some(text) = message_body(&message) {
-                        messages.push((message.from, text));
+                        let profile_name = contacts
+                            .iter()
+                            .find(|contact| {
+                                normalize_phone(&contact.wa_id) == normalize_phone(&message.from)
+                            })
+                            .map(|contact| contact.profile.name.clone());
+                        messages.push(ParsedIncomingMessage {
+                            from: message.from,
+                            text,
+                            profile_name,
+                        });
                     }
                 }
             }
@@ -92,43 +123,43 @@ impl WhatsApp {
     }
 
     pub async fn send_review_choice_list(
-    &self,
-    to: &str,
-    body: &str,
-    _button_label: &str,
-    rows: &[(&str, &str, &str)],
-) -> anyhow::Result<()> {
-    let to = normalize_phone(to);
-    let buttons: Vec<_> = rows
-        .iter()
-        .map(|(id, title, _description)| {
-            serde_json::json!({
-                "type": "reply",
-                "reply": {
-                    "id": id,
-                    "title": title,
-                }
+        &self,
+        to: &str,
+        body: &str,
+        _button_label: &str,
+        rows: &[(&str, &str, &str)],
+    ) -> anyhow::Result<()> {
+        let to = normalize_phone(to);
+        let buttons: Vec<_> = rows
+            .iter()
+            .map(|(id, title, _description)| {
+                serde_json::json!({
+                    "type": "reply",
+                    "reply": {
+                        "id": id,
+                        "title": title,
+                    }
+                })
             })
-        })
-        .collect();
+            .collect();
 
-    self.send_interactive(
-        &to,
-        serde_json::json!({
-            "type": "interactive",
-            "interactive": {
-                "type": "button",
-                "body": {
-                    "text": body
-                },
-                "action": {
-                    "buttons": buttons
+        self.send_interactive(
+            &to,
+            serde_json::json!({
+                "type": "interactive",
+                "interactive": {
+                    "type": "button",
+                    "body": {
+                        "text": body
+                    },
+                    "action": {
+                        "buttons": buttons
+                    }
                 }
-            }
-        }),
-    )
-    .await
-}
+            }),
+        )
+        .await
+    }
 
     pub async fn send_text(&self, to: &str, body: &str) -> anyhow::Result<()> {
         let to = normalize_phone(to);

@@ -2,7 +2,7 @@ use crate::db::{
     ConversationInvite, Db, OnboardingData, OnboardingStep, ParticipantRole,
 };
 use anyhow::Context;
-use crate::phone::{display_phone, looks_like_phone, normalize_phone, phones_match};
+use crate::phone::{contact_label, looks_like_phone, normalize_phone, phones_match};
 use crate::whatsapp::WhatsApp;
 
 pub async fn start_new_conversation(
@@ -87,7 +87,8 @@ pub async fn handle_invite_response(
         "DECLINE" => decline_invite(db, whatsapp, phone, invite).await,
         _ => {
             let conversation = db.get_conversation(invite.conversation_id).await?;
-            let inviter = display_phone(&invite.inviter_phone);
+            let inviter_name = db.get_display_name(&invite.inviter_phone).await?;
+            let inviter = contact_label(&invite.inviter_phone, inviter_name.as_deref());
             let invitee_role = invite.inviter_role.opposite();
             let role_label = match invitee_role {
                 ParticipantRole::Teacher => "teacher",
@@ -231,12 +232,13 @@ async fn send_invite(
         .await?
         .is_some()
     {
+        let partner_name = db.get_display_name(partner_phone).await?;
         whatsapp
             .send_text(
                 phone,
                 &format!(
                     "You're already connected with {}. Reply LIST to see your conversations.",
-                    display_phone(partner_phone)
+                    contact_label(partner_phone, partner_name.as_deref())
                 ),
             )
             .await?;
@@ -247,16 +249,14 @@ async fn send_invite(
         .find_pending_invite_between(phone, partner_phone)
         .await?
     {
+        let partner_name = db.get_display_name(partner_phone).await?;
+        let partner = contact_label(partner_phone, partner_name.as_deref());
         let message = if phones_match(&invite.inviter_phone, phone) {
             format!(
-                "You already have a pending invite with {}. Waiting for them to accept.",
-                display_phone(partner_phone)
+                "You already have a pending invite with {partner}. Waiting for them to accept."
             )
         } else {
-            format!(
-                "{} already invited you! Reply ACCEPT or DECLINE to their invite first.",
-                display_phone(partner_phone)
-            )
+            format!("{partner} already invited you! Reply ACCEPT or DECLINE to their invite first.")
         };
         whatsapp.send_text(phone, &message).await?;
         return Ok(());
@@ -277,7 +277,8 @@ async fn send_invite(
         .create_invite(conversation.id, phone, partner_phone, role)
         .await?;
 
-    let inviter_display = display_phone(phone);
+    let inviter_name = db.get_display_name(phone).await?;
+    let inviter_display = contact_label(phone, inviter_name.as_deref());
     let invitee_role = role.opposite();
     let role_label = match invitee_role {
         ParticipantRole::Teacher => "teacher",
@@ -375,12 +376,13 @@ async fn accept_invite(
         }
     }
 
+    let invitee_name = db.get_display_name(phone).await?;
     whatsapp
         .send_text(
             &invite.inviter_phone,
             &format!(
                 "You're connected to {}! Reply LIST to see all conversations or just start messaging.",
-                display_phone(phone)
+                contact_label(phone, invitee_name.as_deref())
             ),
         )
         .await?;
@@ -398,6 +400,7 @@ async fn decline_invite(
         .await?;
     db.delete_conversation(invite.conversation_id).await?;
 
+    let invitee_name = db.get_display_name(phone).await?;
     whatsapp
         .send_text(phone, "Invite declined.")
         .await?;
@@ -406,7 +409,7 @@ async fn decline_invite(
             &invite.inviter_phone,
             &format!(
                 "{} declined your invite. You can start over by sending LEARNER or TEACHER.",
-                display_phone(phone)
+                contact_label(phone, invitee_name.as_deref())
             ),
         )
         .await?;

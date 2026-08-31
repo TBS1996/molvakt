@@ -15,8 +15,16 @@ pub fn looks_like_phone(text: &str) -> bool {
     digits.len() >= 8 && digits.len() * 2 >= trimmed.len()
 }
 
-pub fn partner_label(phone: &str, language: &str) -> String {
-    format!("{} ({language})", display_phone(phone))
+pub fn contact_label(phone: &str, display_name: Option<&str>) -> String {
+    display_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| display_phone(phone))
+}
+
+pub fn partner_label(phone: &str, language: &str, display_name: Option<&str>) -> String {
+    format!("{} ({language})", contact_label(phone, display_name))
 }
 
 pub fn display_phone(phone: &str) -> String {

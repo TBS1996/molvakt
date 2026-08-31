@@ -33,6 +33,7 @@ pub struct ConversationListing {
     pub target_language: String,
     pub role: ParticipantRole,
     pub partner_phone: Option<String>,
+    pub partner_display_name: Option<String>,
     pub is_active: bool,
     pub is_pending: bool,
 }
@@ -370,11 +371,18 @@ impl Db {
                     .await?
             };
 
+            let partner_display_name = if let Some(ref partner_phone) = partner_phone {
+                self.get_display_name(partner_phone).await?
+            } else {
+                None
+            };
+
             listings.push(ConversationListing {
                 conversation_id: participant.conversation_id,
                 target_language: conversation.target_language,
                 role: participant.role,
                 partner_phone,
+                partner_display_name,
                 is_active: active_id == Some(participant.conversation_id),
                 is_pending,
             });
@@ -565,11 +573,44 @@ impl Db {
                active_conversation_id = excluded.active_conversation_id,
                updated_at = excluded.updated_at",
         )
-        .bind(phone)
+        .bind(&phone)
         .bind(conversation_id)
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    pub async fn upsert_display_name(&self, phone: &str, display_name: &str) -> anyhow::Result<()> {
+        let phone = normalize_phone(phone);
+        let display_name = display_name.trim();
+        if display_name.is_empty() {
+            return Ok(());
+        }
+
+        sqlx::query(
+            "INSERT INTO user_settings (phone, display_name, updated_at)
+             VALUES (?, ?, datetime('now'))
+             ON CONFLICT(phone) DO UPDATE SET
+               display_name = excluded.display_name,
+               updated_at = excluded.updated_at",
+        )
+        .bind(&phone)
+        .bind(display_name)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_display_name(&self, phone: &str) -> anyhow::Result<Option<String>> {
+        let phone = normalize_phone(phone);
+        let name: Option<String> = sqlx::query_scalar(
+            "SELECT display_name FROM user_settings WHERE phone = ?",
+        )
+        .bind(phone)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(name.filter(|name| !name.trim().is_empty()))
     }
 
     pub async fn create_invite(

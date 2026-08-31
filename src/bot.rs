@@ -9,7 +9,7 @@ use crate::db::{Conversation, Db, MessageRole, Participant, ParticipantResolve, 
 use crate::flow::{self, LearnerSession};
 use crate::llm::Llm;
 use crate::onboarding;
-use crate::phone::{display_phone, partner_label};
+use crate::phone::{contact_label, partner_label};
 use crate::whatsapp::WhatsApp;
 
 #[derive(Clone)]
@@ -32,14 +32,28 @@ impl Bot {
             println!("whatsapp webhook: no handled messages in payload");
             return Ok(());
         }
-        for (phone, text) in messages {
-            println!("whatsapp webhook: message from {phone}: {text:?}");
-            if let Err(error) = self.handle_message(&phone, &text).await {
-                eprintln!("error handling message from {phone}: {error:?}");
+        for message in messages {
+            println!(
+                "whatsapp webhook: message from {}: {:?}",
+                message.from, message.text
+            );
+            if let Some(ref name) = message.profile_name {
+                if let Err(error) = self.db.upsert_display_name(&message.from, name).await {
+                    eprintln!(
+                        "error saving display name for {}: {error:?}",
+                        message.from
+                    );
+                }
+            }
+            if let Err(error) = self
+                .handle_message(&message.from, &message.text)
+                .await
+            {
+                eprintln!("error handling message from {}: {error:?}", message.from);
                 let _ = self
                     .whatsapp
                     .send_text(
-                        &phone,
+                        &message.from,
                         "Sorry, something went wrong. Please try again in a moment.",
                     )
                     .await;
@@ -103,12 +117,13 @@ impl Bot {
                 handle_list(&self.db, &self.whatsapp, phone).await
             }
             ParticipantResolve::WaitingInvite { invite, .. } => {
+                let invitee_name = self.db.get_display_name(&invite.invitee_phone).await?;
                 self.whatsapp
                     .send_text(
                         phone,
                         &format!(
                             "Still waiting for {} to accept your invite.",
-                            display_phone(&invite.invitee_phone)
+                            contact_label(&invite.invitee_phone, invitee_name.as_deref())
                         ),
                     )
                     .await?;
@@ -177,9 +192,14 @@ impl Bot {
             .insert_message(conversation.id, MessageRole::Teacher, text)
             .await?;
 
+        let teacher_name = self.db.get_display_name(&teacher.phone).await?;
         let (new_session, teacher_message) = flow::begin_review(
             text.to_string(),
-            &partner_label(&teacher.phone, &conversation.target_language),
+            &partner_label(
+                &teacher.phone,
+                &conversation.target_language,
+                teacher_name.as_deref(),
+            ),
         );
         self.db
             .save_learner_session(learner.id, &new_session)
@@ -210,7 +230,12 @@ impl Bot {
         let history = self.db.load_history(conversation.id).await?;
         let mut session = self.db.load_learner_session(learner.id).await?;
 
-        let learner_label = partner_label(&learner.phone, &conversation.target_language);
+        let learner_name = self.db.get_display_name(&learner.phone).await?;
+        let learner_label = partner_label(
+            &learner.phone,
+            &conversation.target_language,
+            learner_name.as_deref(),
+        );
         let turn =
             flow::handle_learner_message(&mut session, text, &history, &llm, &learner_label)
                 .await?;
