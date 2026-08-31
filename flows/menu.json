@@ -1,0 +1,320 @@
+{
+  "version": "7.3",
+  "data_api_version": "3.0",
+  "routing_model": {
+    "MAIN": ["PICK_CHAT", "PICK_MODE", "SET_LANGUAGE", "START_NEW"],
+    "PICK_CHAT": [],
+    "PICK_MODE": [],
+    "SET_LANGUAGE": [],
+    "START_NEW": []
+  },
+  "screens": [
+    {
+      "id": "MAIN",
+      "title": "molvakt",
+      "data": {
+        "summary": {
+          "type": "string",
+          "__example__": "Current chat: Mel\nExchange (turns) — you learn French, partner learns Norwegian"
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "title": { "type": "string" },
+              "description": { "type": "string" }
+            }
+          },
+          "__example__": [
+            { "id": "menu_list", "title": "View conversations", "description": "See all your chats" },
+            { "id": "menu_switch", "title": "Switch chat", "description": "Change active conversation" },
+            { "id": "menu_set_mode", "title": "Set mode", "description": "Change mode on active chat" },
+            { "id": "menu_set_language", "title": "Set language", "description": "Change language on active chat" },
+            { "id": "menu_cancel", "title": "Cancel invite", "description": "Remove a pending invite" },
+            { "id": "menu_start", "title": "Start new", "description": "Learner, teacher, or exchange" },
+            { "id": "menu_review_vocab", "title": "Review vocab", "description": "Flashcards for active language" },
+            { "id": "menu_help", "title": "Help", "description": "How molvakt works" }
+          ]
+        }
+      },
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "Form",
+            "name": "main_form",
+            "children": [
+              {
+                "type": "TextHeading",
+                "text": "Menu"
+              },
+              {
+                "type": "TextBody",
+                "text": "${data.summary}"
+              },
+              {
+                "type": "RadioButtonsGroup",
+                "label": "Pick an action",
+                "name": "action",
+                "data-source": "${data.actions}",
+                "required": true
+              },
+              {
+                "type": "Footer",
+                "label": "Continue",
+                "on-click-action": {
+                  "name": "data_exchange",
+                  "payload": {
+                    "trigger": "main_action",
+                    "action": "${form.action}"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "PICK_CHAT",
+      "title": "Pick chat",
+      "data": {
+        "prompt": {
+          "type": "string",
+          "__example__": "Which conversation do you want to switch to?"
+        },
+        "menu_action": {
+          "type": "string",
+          "__example__": "switch"
+        },
+        "conversations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "title": { "type": "string" },
+              "description": { "type": "string" }
+            }
+          },
+          "__example__": [
+            {
+              "id": "42",
+              "title": "1. Mel*",
+              "description": "Exchange (turns), your turn — write in French"
+            },
+            {
+              "id": "17",
+              "title": "2. Anna",
+              "description": "You learn Norwegian, waiting for message"
+            }
+          ]
+        }
+      },
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "Form",
+            "name": "pick_chat_form",
+            "children": [
+              {
+                "type": "TextBody",
+                "text": "${data.prompt}"
+              },
+              {
+                "type": "RadioButtonsGroup",
+                "label": "Conversation",
+                "name": "conversation_id",
+                "data-source": "${data.conversations}",
+                "required": true
+              },
+              {
+                "type": "Footer",
+                "label": "Continue",
+                "on-click-action": {
+                  "name": "data_exchange",
+                  "payload": {
+                    "trigger": "chat_picked",
+                    "menu_action": "${data.menu_action}",
+                    "conversation_id": "${form.conversation_id}"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "PICK_MODE",
+      "title": "Set mode",
+      "terminal": true,
+      "data": {
+        "partner": {
+          "type": "string",
+          "__example__": "Mel"
+        }
+      },
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "Form",
+            "name": "pick_mode_form",
+            "children": [
+              {
+                "type": "TextBody",
+                "text": "Choose a mode for your chat with ${data.partner}."
+              },
+              {
+                "type": "RadioButtonsGroup",
+                "label": "Mode",
+                "name": "mode",
+                "data-source": [
+                  {
+                    "id": "menu_mode_learner",
+                    "title": "Learner",
+                    "description": "You practice, partner teaches"
+                  },
+                  {
+                    "id": "menu_mode_teacher",
+                    "title": "Teacher",
+                    "description": "You teach, partner practices"
+                  },
+                  {
+                    "id": "menu_mode_exchange",
+                    "title": "Exchange",
+                    "description": "Write in your learning language"
+                  },
+                  {
+                    "id": "menu_mode_turns",
+                    "title": "Exchange (turns)",
+                    "description": "Alternate languages each round"
+                  }
+                ],
+                "required": true
+              },
+              {
+                "type": "Footer",
+                "label": "Save",
+                "on-click-action": {
+                  "name": "complete",
+                  "payload": {
+                    "action": "set_mode",
+                    "mode": "${form.mode}"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "SET_LANGUAGE",
+      "title": "Set language",
+      "terminal": true,
+      "data": {
+        "partner": {
+          "type": "string",
+          "__example__": "Mel"
+        }
+      },
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "Form",
+            "name": "set_language_form",
+            "children": [
+              {
+                "type": "TextBody",
+                "text": "What language should your chat with ${data.partner} use?"
+              },
+              {
+                "type": "TextInput",
+                "label": "Language",
+                "name": "language",
+                "required": true,
+                "helper-text": "e.g. Norwegian, French"
+              },
+              {
+                "type": "Footer",
+                "label": "Save",
+                "on-click-action": {
+                  "name": "complete",
+                  "payload": {
+                    "action": "set_language",
+                    "language": "${form.language}"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "START_NEW",
+      "title": "Start new",
+      "terminal": true,
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "Form",
+            "name": "start_new_form",
+            "children": [
+              {
+                "type": "TextBody",
+                "text": "What kind of conversation do you want to add?"
+              },
+              {
+                "type": "RadioButtonsGroup",
+                "label": "Type",
+                "name": "start_mode",
+                "data-source": [
+                  {
+                    "id": "mode_learner",
+                    "title": "Learner",
+                    "description": "You practice, partner teaches"
+                  },
+                  {
+                    "id": "mode_teacher",
+                    "title": "Teacher",
+                    "description": "You teach, partner practices"
+                  },
+                  {
+                    "id": "mode_exchange",
+                    "title": "Exchange",
+                    "description": "Each writes in own language"
+                  },
+                  {
+                    "id": "mode_turns",
+                    "title": "Exchange (turns)",
+                    "description": "Alternate languages each round"
+                  }
+                ],
+                "required": true
+              },
+              {
+                "type": "Footer",
+                "label": "Continue",
+                "on-click-action": {
+                  "name": "complete",
+                  "payload": {
+                    "action": "start_new",
+                    "start_mode": "${form.start_mode}"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
