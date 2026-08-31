@@ -35,6 +35,8 @@ pub struct JudgmentResponse {
     pub accepted: bool,
     #[serde(default)]
     pub feedback: String,
+    #[serde(default)]
+    pub wrong_language: bool,
 }
 
 #[derive(Deserialize)]
@@ -208,15 +210,25 @@ impl Llm {
              including informal, elliptical, or abbreviated phrasing (e.g. short follow-ups like \
              'og du?'). Do NOT reject for style, formality, spelling mistakes, missing diacritics \
              or special letters (e.g. 'nasilsin' for 'nasılsın'), or because you would phrase it \
-             differently. Reject only for clear grammatical errors or meaning that would confuse \
-             a native speaker, or if the reply is in the wrong language. \
-             If they wrote in {source} instead of {target}, reject but help them: briefly \
-             explain what they were trying to say, teach the grammar they need, and give \
-             useful words or patterns for answering in {target} — without writing the full \
-             reply for them. For other rejections, give a short hint without rewriting \
-             the sentence. When in doubt, accept. {english_rule} \
+             differently. Reject only for clear grammatical errors in {target} that would confuse \
+             a native speaker. \
+             If the draft is primarily in any language other than {target} (e.g. English, {source}, \
+             or another language), treat that as a beginner who knows what they want to say but \
+             cannot phrase it in {target} yet. Set accepted to false and wrong_language to true. \
+             In feedback (English only), use exactly these sections:\n\
+             What you wrote — quote or paraphrase their meaning in English.\n\
+             Translation — the full natural {target} sentence they should send.\n\
+             Grammar — explain how that {target} sentence is built (word order, verb forms, \
+             articles, etc.) so a beginner can learn from it.\n\
+             End with one line: \"Now type the {target} version yourself to send it.\"\n\
+             For grammar mistakes while still writing in {target}, set wrong_language to false \
+             and give a short hint without giving the full corrected sentence. \
+             When in doubt whether it's wrong language vs bad {target}, prefer wrong_language if \
+             most of the message is not in {target}. When in doubt otherwise, accept. \
+             {english_rule} \
              Respond with JSON only: \
-             {{\"accepted\": true/false, \"feedback\": \"hints, mini-lesson, or brief praise\"}}",
+             {{\"accepted\": true/false, \"wrong_language\": true/false, \
+             \"feedback\": \"hints, mini-lesson, or brief praise\"}}",
             target = self.target_language,
             source = self.source_language,
             language_only = LANGUAGE_ONLY_JUDGE,

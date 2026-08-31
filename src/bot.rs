@@ -410,7 +410,7 @@ impl Bot {
             .unwrap_or(&conversation.source_language);
 
         let history = self.db.load_history(conversation.id).await?;
-        let llm = Llm::for_exchange(learning_language, partner_learning_language)?;
+        let llm = Llm::for_exchange(learning_language, "English")?;
         let judgment = llm.validate_reply(text, &history).await?;
         if !judgment.accepted {
             self.whatsapp
@@ -529,22 +529,19 @@ impl Bot {
                 .await;
         }
 
-        let other_language =
-            conversation.other_exchange_language_in_pair(active_language, &lang_a, &lang_b);
-
         let history = self.db.load_history(conversation.id).await?;
-        let llm = Llm::for_exchange(active_language, &other_language)?;
+        let llm = Llm::for_exchange(active_language, "English")?;
         let judgment = llm.validate_reply(text, &history).await?;
         if !judgment.accepted {
-            self.whatsapp
-                .send_text(
-                    &sender.phone,
-                    &format!(
-                        "{}\n\n(Write in {active_language} on your turn.)",
-                        judgment.feedback
-                    ),
+            let message = if judgment.wrong_language {
+                judgment.feedback
+            } else {
+                format!(
+                    "{}\n\n(Write in {active_language} on your turn.)",
+                    judgment.feedback
                 )
-                .await?;
+            };
+            self.whatsapp.send_text(&sender.phone, &message).await?;
             return Ok(());
         }
 
