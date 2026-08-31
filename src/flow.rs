@@ -250,9 +250,7 @@ pub fn build_teacher_summary(
     learner_label: &str,
 ) -> String {
     let understanding = match reply.understanding {
-        UnderstandingSummary::UnderstoodCompletely => {
-            "They understood your message completely.".to_string()
-        }
+        UnderstandingSummary::UnderstoodCompletely => "".to_string(),
         UnderstandingSummary::DidNotUnderstand => {
             "They didn't understand your message and were given a full explanation.".to_string()
         }
@@ -277,7 +275,13 @@ pub fn build_teacher_summary(
 
     let reply_attempts = reply.attempts.len();
 
+    let reply_attempts_text = if reply_attempts == 1 {
+        "".to_string()
+    } else {
+        format!("They needed {reply_attempts} iteration(s) to craft this message.")
+    };
+
     format!(
-        "Reply from {learner_label}: {learner_message}\n\n{understanding}\nThey needed {reply_attempts} iteration(s) to craft this message."
+        "[{learner_label}]: {learner_message}\n\n{understanding}\n{reply_attempts_text}"
     )
 }
