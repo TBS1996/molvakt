@@ -20,6 +20,7 @@
             # Rust
             cargo
             rustc
+            rustPlatform.rustLibSrc
             rust-analyzer
             rustfmt
             clippy
@@ -45,6 +46,7 @@
 
           env = {
             RUST_BACKTRACE = "1";
+            RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
 
             # sqlx-cli will use this by default
             DATABASE_URL = "sqlite:languagebot.db";

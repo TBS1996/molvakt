@@ -11,6 +11,11 @@ use serde::Deserialize;
 use crate::db::Conversation;
 use crate::history::HistoryEntry;
 
+const EXPLANATIONS_IN_ENGLISH: &str =
+    "All feedback, grammar help, and explanations must be written in English only — \
+     never in the student's native language or the target language. \
+     You may still quote words or short phrases in the target language when teaching vocabulary.";
+
 pub struct Llm {
     client: Client<OpenAIConfig>,
     model: String,
@@ -74,11 +79,12 @@ impl Llm {
              as long as the meaning is clear. \
              Reject ONLY if the message is primarily in another language (e.g. {source}) \
              or is not real text in any language. A few loanwords are fine. \
-             When in doubt, accept. All feedback and explanations must be written in English\
+             When in doubt, accept. {english_rule} \
              Respond with JSON only: \
              {{\"accepted\": true/false, \"feedback\": \"brief explanation if rejected\"}}",
             target = self.target_language,
             source = self.source_language,
+            english_rule = EXPLANATIONS_IN_ENGLISH,
         );
 
         let user = format!("Message: {message}");
@@ -97,10 +103,12 @@ impl Llm {
              Judge whether their translation of a message from {target} into {source} \
              captures the meaning well enough. Be fair: minor wording differences are fine \
              if the meaning is correct. Ignore spelling mistakes and missing diacritics. \
+             {english_rule} \
              Respond with JSON only: \
              {{\"accepted\": true/false, \"feedback\": \"short explanation\"}}",
             target = self.target_language,
             source = self.source_language,
+            english_rule = EXPLANATIONS_IN_ENGLISH,
         );
 
         let user = format!(
@@ -122,7 +130,7 @@ impl Llm {
              {format}",
             target = self.target_language,
             source = self.source_language,
-            format = teaching_format(&self.target_language, &self.source_language),
+            format = teaching_format(&self.target_language),
         );
 
         let user = format!(
@@ -149,7 +157,7 @@ impl Llm {
              {format}",
             target = self.target_language,
             source = self.source_language,
-            format = teaching_format(&self.target_language, &self.source_language),
+            format = teaching_format(&self.target_language),
         );
 
         let user = format!(
@@ -180,11 +188,12 @@ impl Llm {
              explain what they were trying to say, teach the grammar they need, and give \
              useful words or patterns for answering in {target} — without writing the full \
              reply for them. For other rejections, give a short hint without rewriting \
-             the sentence. When in doubt, accept. \
+             the sentence. When in doubt, accept. {english_rule} \
              Respond with JSON only: \
              {{\"accepted\": true/false, \"feedback\": \"hints, mini-lesson, or brief praise\"}}",
             target = self.target_language,
             source = self.source_language,
+            english_rule = EXPLANATIONS_IN_ENGLISH,
         );
 
         let user = format!(
@@ -247,18 +256,22 @@ impl Llm {
     }
 }
 
-fn teaching_format(target: &str, source: &str) -> String {
+fn teaching_format(target: &str) -> String {
     format!(
-        "Structure your answer for WhatsApp (plain text, short labeled sections):\n\
-         Translation — natural {source} equivalent.\n\
-         Meaning — one or two sentences on what the message is saying.\n\
-         Grammar — explain sentence structure, word order, verb forms, articles, cases, \
-         or other patterns a beginner should learn from this message. always explain in english\n\
-         Words — break down each word or short phrase: dictionary meaning plus its role \
-         in this sentence.\n\
+        "Structure your answer for WhatsApp (plain text, short labeled sections). \
+         {english_rule}\n\
+         Translation — natural English equivalent.\n\
+         Meaning — one or two sentences in English on what the message is saying.\n\
+         Grammar — explain in English: sentence structure, word order, verb forms, articles, cases, \
+         or other patterns a beginner should learn from this message.\n\
+         Words — break down each word or short phrase: the form as written, its English meaning, \
+         and its role in this sentence (explained in English).\n\
          How to reply — useful patterns or phrases for answering a message like this \
-         in {target}; show building blocks, not a full scripted answer.\n\
-         Be thorough and beginner-friendly. Prefer teaching over brevity."
+         in {target}; show building blocks in {target} with brief English notes on usage, \
+         not a full scripted answer.\n\
+         Be thorough and beginner-friendly. Prefer teaching over brevity.",
+        english_rule = EXPLANATIONS_IN_ENGLISH,
+        target = target,
     )
 }
 
