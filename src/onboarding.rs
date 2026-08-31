@@ -10,6 +10,7 @@ const MODE_TEACHER: &str = "mode_teacher";
 const MODE_EXCHANGE: &str = "mode_exchange";
 const MODE_EXCHANGE_TURNS: &str = "mode_turns";
 const ONBOARDING_CANCEL: &str = "onboard_cancel";
+const ONBOARDING_BACK: &str = "onboard_back";
 
 enum ModeSelection {
     Learner,
@@ -196,6 +197,9 @@ async fn continue_onboarding(
         OnboardingStep::EnterPartnerPhone => {
             if is_onboarding_cancel(text) {
                 return cancel_onboarding(db, whatsapp, phone).await;
+            }
+            if is_onboarding_back(text) {
+                return go_back_to_mode_picker(db, whatsapp, phone).await;
             }
 
             let partner_phone = normalize_phone(text);
@@ -724,8 +728,13 @@ fn is_onboarding_cancel(text: &str) -> bool {
     text == ONBOARDING_CANCEL
         || matches!(
             text.trim().to_ascii_uppercase().as_str(),
-            "CANCEL" | "MENU" | "BACK"
+            "CANCEL" | "MENU"
         )
+}
+
+fn is_onboarding_back(text: &str) -> bool {
+    text == ONBOARDING_BACK
+        || matches!(text.trim().to_ascii_uppercase().as_str(), "BACK")
 }
 
 async fn send_partner_phone_prompt(
@@ -733,17 +742,31 @@ async fn send_partner_phone_prompt(
     phone: &str,
     body: &str,
 ) -> anyhow::Result<()> {
+    let body = format!(
+        "{body}\n\nTap Cancel to stop, or Go back to pick a different mode."
+    );
     whatsapp
         .send_review_choice_list(
             phone,
-            body,
-            "Cancel",
-            &[(ONBOARDING_CANCEL, "Cancel", "")],
+            &body,
+            "Options",
+            &[
+                (ONBOARDING_CANCEL, "Cancel", ""),
+                (ONBOARDING_BACK, "Go back", ""),
+            ],
         )
         .await
 }
 
 async fn cancel_onboarding(db: &Db, whatsapp: &WhatsApp, phone: &str) -> anyhow::Result<()> {
+    db.clear_onboarding_session(phone).await?;
+    whatsapp
+        .send_text(phone, "Cancelled adding conversation.")
+        .await?;
+    Ok(())
+}
+
+async fn go_back_to_mode_picker(db: &Db, whatsapp: &WhatsApp, phone: &str) -> anyhow::Result<()> {
     db.clear_onboarding_session(phone).await?;
     send_new_conversation_menu(whatsapp, phone).await
 }
