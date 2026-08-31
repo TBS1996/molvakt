@@ -347,9 +347,7 @@ pub async fn handle_set_mode(
                             phone,
                             &format!(
                                 "Switched to turn-based exchange with {partner_label}. \
-                                 You learn {your_language}.\n\n\
-                                 On your turn, write in {your_language}. \
-                                 When replying, write in your partner's language."
+                                 You learn {your_language} — write in that language on your turn."
                             ),
                         )
                         .await?;
@@ -359,9 +357,8 @@ pub async fn handle_set_mode(
                             &partner.phone,
                             &format!(
                                 "{your_label} switched this chat to turn-based exchange. \
-                                 You learn {partner_language}.\n\n\
-                                 {your_label} goes first — wait for their message, \
-                                 then reply in {your_language}."
+                                 You learn {partner_language} — write in that language on your turn.\n\n\
+                                 {your_label} goes first."
                             ),
                         )
                         .await?;

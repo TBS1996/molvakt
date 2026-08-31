@@ -20,7 +20,6 @@ pub struct Conversation {
     pub target_language: String,
     pub source_language: String,
     pub exchange_turn_phone: Option<String>,
-    pub exchange_awaiting_reply: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -308,7 +307,6 @@ impl Db {
             target_language: target_language.to_string(),
             source_language: source_language.to_string(),
             exchange_turn_phone: None,
-            exchange_awaiting_reply: false,
         })
     }
 
@@ -401,7 +399,7 @@ impl Db {
 
     pub async fn get_conversation(&self, conversation_id: i64) -> anyhow::Result<Conversation> {
         let row = sqlx::query(
-            "SELECT id, mode, target_language, source_language, exchange_turn_phone, exchange_awaiting_reply
+            "SELECT id, mode, target_language, source_language, exchange_turn_phone
              FROM conversations WHERE id = ?",
         )
         .bind(conversation_id)
@@ -414,7 +412,6 @@ impl Db {
             target_language: row.get("target_language"),
             source_language: row.get("source_language"),
             exchange_turn_phone: row.get("exchange_turn_phone"),
-            exchange_awaiting_reply: row.get::<i64, _>("exchange_awaiting_reply") != 0,
         })
     }
 
@@ -558,12 +555,8 @@ impl Db {
             } else if conversation.mode == ConversationMode::ExchangeTurns {
                 if self.exchange_is_ready(participant.conversation_id).await? {
                     Some(
-                        self.turn_status_for_exchange_turns(
-                            &conversation,
-                            &participant,
-                            partner_phone.as_deref(),
-                        )
-                        .await?,
+                        self.turn_status_for_exchange_turns(&conversation, &participant)
+                            .await?,
                     )
                 } else {
                     Some(ConversationTurnStatus::WaitingForMessage)
@@ -611,20 +604,12 @@ impl Db {
         &self,
         conversation: &Conversation,
         participant: &Participant,
-        _partner_phone: Option<&str>,
     ) -> anyhow::Result<ConversationTurnStatus> {
-        let Some(prompt_phone) = conversation.exchange_turn_phone.as_deref() else {
+        let Some(turn_phone) = conversation.exchange_turn_phone.as_deref() else {
             return Ok(ConversationTurnStatus::YourTurnToSend);
         };
 
-        let is_prompter = participant.phone == prompt_phone;
-        if conversation.exchange_awaiting_reply {
-            if is_prompter {
-                Ok(ConversationTurnStatus::WaitingForReply)
-            } else {
-                Ok(ConversationTurnStatus::YourTurnToReply)
-            }
-        } else if is_prompter {
+        if participant.phone == turn_phone {
             Ok(ConversationTurnStatus::YourTurnToSend)
         } else {
             Ok(ConversationTurnStatus::WaitingForMessage)
@@ -661,29 +646,17 @@ impl Db {
         Ok(())
     }
 
-    pub async fn mark_exchange_awaiting_reply(&self, conversation_id: i64) -> anyhow::Result<()> {
-        sqlx::query("UPDATE conversations SET exchange_awaiting_reply = 1 WHERE id = ?")
+    pub async fn pass_exchange_turn(
+        &self,
+        conversation_id: i64,
+        next_turn_phone: &str,
+    ) -> anyhow::Result<()> {
+        let phone = normalize_phone(next_turn_phone);
+        sqlx::query("UPDATE conversations SET exchange_turn_phone = ? WHERE id = ?")
+            .bind(&phone)
             .bind(conversation_id)
             .execute(&self.pool)
             .await?;
-        Ok(())
-    }
-
-    pub async fn complete_exchange_reply(
-        &self,
-        conversation_id: i64,
-        replier_phone: &str,
-    ) -> anyhow::Result<()> {
-        let phone = normalize_phone(replier_phone);
-        sqlx::query(
-            "UPDATE conversations
-             SET exchange_turn_phone = ?, exchange_awaiting_reply = 0
-             WHERE id = ?",
-        )
-        .bind(&phone)
-        .bind(conversation_id)
-        .execute(&self.pool)
-        .await?;
         Ok(())
     }
 
@@ -777,10 +750,6 @@ impl Db {
                     return Err(SetModeError::ActiveExchange.into());
                 }
             }
-        }
-
-        if conversation.mode == ConversationMode::ExchangeTurns && conversation.exchange_awaiting_reply {
-            return Err(SetModeError::ActiveExchange.into());
         }
 
         match setting {
