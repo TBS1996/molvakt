@@ -9,6 +9,7 @@ const MODE_LEARNER: &str = "mode_learner";
 const MODE_TEACHER: &str = "mode_teacher";
 const MODE_EXCHANGE: &str = "mode_exchange";
 const MODE_EXCHANGE_TURNS: &str = "mode_turns";
+const ONBOARDING_CANCEL: &str = "onboard_cancel";
 
 enum ModeSelection {
     Learner,
@@ -69,7 +70,7 @@ pub async fn start_new_conversation(
             "Send your learner's phone number with country code (e.g. +14155551234)."
         }
     };
-    whatsapp.send_text(phone, prompt).await?;
+    send_partner_phone_prompt(whatsapp, phone, prompt).await?;
     Ok(())
 }
 
@@ -98,7 +99,7 @@ pub async fn start_new_exchange_conversation(
         }
         ConversationMode::Tutor => unreachable!(),
     };
-    whatsapp.send_text(phone, prompt).await?;
+    send_partner_phone_prompt(whatsapp, phone, prompt).await?;
     Ok(())
 }
 
@@ -193,6 +194,10 @@ async fn continue_onboarding(
             }
         }
         OnboardingStep::EnterPartnerPhone => {
+            if is_onboarding_cancel(text) {
+                return cancel_onboarding(db, whatsapp, phone).await;
+            }
+
             let partner_phone = normalize_phone(text);
             if partner_phone.len() < 8 {
                 whatsapp
@@ -681,4 +686,35 @@ pub async fn send_welcome_menu(whatsapp: &WhatsApp, phone: &str) -> anyhow::Resu
 
 fn default_source_language() -> String {
     std::env::var("MOLVAKT_SOURCE_LANGUAGE").unwrap_or_else(|_| "English".into())
+}
+
+fn is_onboarding_cancel(text: &str) -> bool {
+    text == ONBOARDING_CANCEL
+        || matches!(
+            text.trim().to_ascii_uppercase().as_str(),
+            "CANCEL" | "MENU" | "BACK"
+        )
+}
+
+async fn send_partner_phone_prompt(
+    whatsapp: &WhatsApp,
+    phone: &str,
+    body: &str,
+) -> anyhow::Result<()> {
+    whatsapp
+        .send_review_choice_list(
+            phone,
+            body,
+            "Cancel",
+            &[(ONBOARDING_CANCEL, "Cancel", "")],
+        )
+        .await
+}
+
+async fn cancel_onboarding(db: &Db, whatsapp: &WhatsApp, phone: &str) -> anyhow::Result<()> {
+    db.clear_onboarding_session(phone).await?;
+    send_welcome(whatsapp, phone).await?;
+    db.save_onboarding_session(phone, OnboardingStep::Welcome, &OnboardingData::default())
+        .await?;
+    Ok(())
 }
