@@ -10,6 +10,7 @@ use serde_json::json;
 
 use crate::bot::Bot;
 use crate::db::Db;
+use crate::reminders;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -20,6 +21,20 @@ pub struct AppState {
 pub async fn run() -> anyhow::Result<()> {
     let db = Db::connect().await?;
     let bot = Bot::new(db.clone()).await?;
+    let whatsapp = bot.whatsapp().clone();
+    let reminder_db = db.clone();
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if let Err(error) = reminders::run_tick(&reminder_db, &whatsapp).await {
+                eprintln!("morning reminder tick: {error:?}");
+            }
+        }
+    });
+
     let state = AppState { db, bot };
 
     let app = Router::new()

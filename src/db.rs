@@ -259,6 +259,13 @@ pub struct MenuData {
     pub flashcard_id: Option<i64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct UserReminderSettings {
+    pub timezone: Option<String>,
+    pub last_message_at: Option<String>,
+    pub last_morning_reminder_date: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuStep {
     PickConversation,
@@ -1969,6 +1976,90 @@ impl Db {
         )
         .bind(ease_factor)
         .bind(card_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_registered_user_phones(&self) -> anyhow::Result<Vec<String>> {
+        let rows = sqlx::query_scalar::<_, String>("SELECT DISTINCT phone FROM participants")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows)
+    }
+
+    pub async fn touch_user_activity(&self, phone: &str) -> anyhow::Result<()> {
+        let phone = normalize_phone(phone);
+        sqlx::query(
+            "INSERT INTO user_settings (phone, last_message_at, updated_at)
+             VALUES (?, datetime('now'), datetime('now'))
+             ON CONFLICT(phone) DO UPDATE SET
+               last_message_at = datetime('now'),
+               updated_at = excluded.updated_at",
+        )
+        .bind(&phone)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_user_reminder_settings(
+        &self,
+        phone: &str,
+    ) -> anyhow::Result<UserReminderSettings> {
+        let phone = normalize_phone(phone);
+        let row = sqlx::query(
+            "SELECT timezone, last_message_at, last_morning_reminder_date
+             FROM user_settings WHERE phone = ?",
+        )
+        .bind(&phone)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row
+            .map(|row| UserReminderSettings {
+                timezone: row.get("timezone"),
+                last_message_at: row.get("last_message_at"),
+                last_morning_reminder_date: row.get("last_morning_reminder_date"),
+            })
+            .unwrap_or(UserReminderSettings {
+                timezone: None,
+                last_message_at: None,
+                last_morning_reminder_date: None,
+            }))
+    }
+
+    pub async fn mark_morning_reminder_sent(
+        &self,
+        phone: &str,
+        local_date: &str,
+    ) -> anyhow::Result<()> {
+        let phone = normalize_phone(phone);
+        sqlx::query(
+            "INSERT INTO user_settings (phone, last_morning_reminder_date, updated_at)
+             VALUES (?, ?, datetime('now'))
+             ON CONFLICT(phone) DO UPDATE SET
+               last_morning_reminder_date = excluded.last_morning_reminder_date,
+               updated_at = excluded.updated_at",
+        )
+        .bind(&phone)
+        .bind(local_date)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_user_timezone(&self, phone: &str, timezone: &str) -> anyhow::Result<()> {
+        let phone = normalize_phone(phone);
+        sqlx::query(
+            "INSERT INTO user_settings (phone, timezone, updated_at)
+             VALUES (?, ?, datetime('now'))
+             ON CONFLICT(phone) DO UPDATE SET
+               timezone = excluded.timezone,
+               updated_at = excluded.updated_at",
+        )
+        .bind(&phone)
+        .bind(timezone)
         .execute(&self.pool)
         .await?;
         Ok(())

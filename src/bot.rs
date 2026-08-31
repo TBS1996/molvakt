@@ -35,6 +35,10 @@ impl Bot {
         })
     }
 
+    pub fn whatsapp(&self) -> &WhatsApp {
+        &self.whatsapp
+    }
+
     pub async fn handle_webhook(&self, body: &str) -> anyhow::Result<()> {
         let messages = WhatsApp::parse_incoming_messages(body)?;
         if messages.is_empty() {
@@ -77,6 +81,8 @@ impl Bot {
         text: &str,
         is_interactive: bool,
     ) -> anyhow::Result<()> {
+        self.db.touch_user_activity(phone).await?;
+
         if let Some(invite) = self.db.find_pending_invite_for_phone(phone).await? {
             return onboarding::handle_invite_response(&self.db, &self.whatsapp, phone, text, invite)
                 .await;
@@ -134,6 +140,11 @@ impl Bot {
 
         if let Some(command) = parse_set_language(text) {
             return handle_set_language(&self.db, &self.whatsapp, phone, command).await;
+        }
+
+        if let Some(timezone) = crate::reminders::parse_timezone_name(text) {
+            return crate::reminders::handle_set_timezone(&self.db, &self.whatsapp, phone, &timezone)
+                .await;
         }
 
         if let Some(selection) = parse_cancel_selection(text) {

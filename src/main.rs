@@ -8,6 +8,7 @@ mod llm;
 mod menu;
 mod onboarding;
 mod phone;
+mod reminders;
 mod server;
 mod vocab;
 mod whatsapp;

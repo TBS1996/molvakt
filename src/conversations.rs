@@ -39,6 +39,21 @@ pub fn format_listing_role_desc(listing: &ConversationListing) -> String {
     }
 }
 
+pub fn listing_awaits_user_reply(listing: &ConversationListing, viewer_phone: &str) -> bool {
+    if listing.is_pending || listing_is_broken(listing, viewer_phone) {
+        return false;
+    }
+    match listing.turn {
+        Some(crate::db::ConversationTurnStatus::YourTurnToReply) => true,
+        Some(crate::db::ConversationTurnStatus::YourTurnToSend) => {
+            listing.mode == ConversationMode::ExchangeTurns
+                || (listing.mode == ConversationMode::Tutor
+                    && listing.role == crate::db::ParticipantRole::Teacher)
+        }
+        _ => false,
+    }
+}
+
 pub fn format_listing_status_text(listing: &ConversationListing) -> String {
     if listing.is_pending {
         "waiting for partner".to_string()
@@ -632,6 +647,7 @@ pub async fn handle_help(whatsapp: &WhatsApp, phone: &str) -> anyhow::Result<()>
              SET MODE <number> teacher|learner|exchange|exchange-turns — change conversation mode\n\
              CANCEL <number> — cancel a pending invite\n\
              SET LANGUAGE <name> — fix language on active conversation\n\
+             SET TIMEZONE <region> — morning reminder time (e.g. Europe/Oslo)\n\
              SET <number> <language> — fix language on a specific one\n\
              LEARNER / TEACHER / EXCHANGE / EXCHANGE-TURNS — start a new conversation\n\
              (New users: message the bot to open the setup menu)\n\n\
