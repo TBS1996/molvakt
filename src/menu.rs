@@ -11,6 +11,7 @@ use crate::db::{
 };
 use crate::onboarding::{self, start_new_conversation, start_new_exchange_conversation};
 use crate::phone::{contact_label, normalize_phone, phones_match};
+use crate::vocab;
 use crate::whatsapp::WhatsApp;
 
 const MAIN_LIST: &str = "menu_list";
@@ -20,6 +21,7 @@ const MAIN_SET_LANGUAGE: &str = "menu_set_language";
 const MAIN_CANCEL: &str = "menu_cancel";
 const MAIN_START: &str = "menu_start";
 const MAIN_HELP: &str = "menu_help";
+const MAIN_REVIEW_VOCAB: &str = "menu_review_vocab";
 
 const START_LEARNER: &str = "mode_learner";
 const START_TEACHER: &str = "mode_teacher";
@@ -100,6 +102,7 @@ pub async fn handle_menu_session(
             )
             .await
         }
+        MenuStep::FlashcardReview => vocab::handle_flashcard_session(db, whatsapp, phone, text, data).await,
     }
 }
 
@@ -136,6 +139,10 @@ pub async fn handle_menu_selection(
         }
         MAIN_HELP => {
             handle_help(whatsapp, phone).await?;
+            Ok(true)
+        }
+        MAIN_REVIEW_VOCAB => {
+            vocab::start_review(db, whatsapp, phone).await?;
             Ok(true)
         }
         START_LEARNER => {
@@ -216,6 +223,7 @@ async fn send_main_menu(db: &Db, whatsapp: &WhatsApp, phone: &str) -> anyhow::Re
                 (MAIN_SET_LANGUAGE, "Set language", "Change language on active chat"),
                 (MAIN_CANCEL, "Cancel invite", "Remove a pending invite"),
                 (MAIN_START, "Start new", "Learner, teacher, or exchange"),
+                (MAIN_REVIEW_VOCAB, "Review vocab", "Flashcards for active language"),
                 (MAIN_HELP, "Help", "How molvakt works"),
             ],
         )
@@ -357,6 +365,7 @@ async fn start_conversation_pick(
             &MenuData {
                 action: Some(action),
                 conversation_index: None,
+                ..MenuData::default()
             },
         )
         .await?;
@@ -370,6 +379,7 @@ async fn start_conversation_pick(
         &MenuData {
             action: Some(action),
             conversation_index: None,
+            ..MenuData::default()
         },
     )
     .await

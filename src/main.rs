@@ -9,6 +9,7 @@ mod menu;
 mod onboarding;
 mod phone;
 mod server;
+mod vocab;
 mod whatsapp;
 
 #[tokio::main]

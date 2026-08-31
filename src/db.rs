@@ -221,6 +221,7 @@ pub enum MenuAction {
 pub struct MenuData {
     pub action: Option<MenuAction>,
     pub conversation_index: Option<usize>,
+    pub flashcard_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,6 +229,22 @@ pub enum MenuStep {
     PickConversation,
     PickMode,
     AwaitLanguage,
+    FlashcardReview,
+}
+
+#[derive(Debug, Clone)]
+pub struct VocabCard {
+    pub id: i64,
+    pub user_phone: String,
+    pub language: String,
+    pub front: String,
+    pub back: String,
+    pub partner_phone: Option<String>,
+    pub conversation_id: Option<i64>,
+    pub interval_days: f64,
+    pub ease_factor: f64,
+    pub repetitions: i32,
+    pub due_date: String,
 }
 
 impl MenuStep {
@@ -236,6 +253,7 @@ impl MenuStep {
             Self::PickConversation => "menu_pick_conversation",
             Self::PickMode => "menu_pick_mode",
             Self::AwaitLanguage => "menu_await_language",
+            Self::FlashcardReview => "menu_flashcard_review",
         }
     }
 
@@ -244,6 +262,7 @@ impl MenuStep {
             "menu_pick_conversation" => Ok(Self::PickConversation),
             "menu_pick_mode" => Ok(Self::PickMode),
             "menu_await_language" => Ok(Self::AwaitLanguage),
+            "menu_flashcard_review" => Ok(Self::FlashcardReview),
             other => anyhow::bail!("unknown menu step: {other}"),
         }
     }
@@ -1576,6 +1595,171 @@ impl Db {
         .await?;
 
         Ok(rows.into_iter().map(participant_from_row).collect())
+    }
+
+    pub async fn insert_vocab_card(
+        &self,
+        user_phone: &str,
+        language: &str,
+        front: &str,
+        back: &str,
+        partner_phone: Option<&str>,
+        conversation_id: Option<i64>,
+    ) -> anyhow::Result<bool> {
+        let user_phone = normalize_phone(user_phone);
+        let partner_phone = partner_phone.map(normalize_phone);
+        let result = sqlx::query(
+            "INSERT OR IGNORE INTO vocab_cards
+             (user_phone, language, front, back, partner_phone, conversation_id)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(user_phone)
+        .bind(language)
+        .bind(front)
+        .bind(back)
+        .bind(partner_phone)
+        .bind(conversation_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn count_due_vocab_cards(
+        &self,
+        user_phone: &str,
+        language: &str,
+    ) -> anyhow::Result<i64> {
+        let user_phone = normalize_phone(user_phone);
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS count FROM vocab_cards
+             WHERE user_phone = ? AND language = ? AND due_date <= date('now')",
+        )
+        .bind(user_phone)
+        .bind(language)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get("count"))
+    }
+
+    pub async fn count_vocab_cards(
+        &self,
+        user_phone: &str,
+        language: &str,
+    ) -> anyhow::Result<i64> {
+        let user_phone = normalize_phone(user_phone);
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS count FROM vocab_cards
+             WHERE user_phone = ? AND language = ?",
+        )
+        .bind(user_phone)
+        .bind(language)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get("count"))
+    }
+
+    pub async fn next_due_vocab_card(
+        &self,
+        user_phone: &str,
+        language: &str,
+    ) -> anyhow::Result<Option<VocabCard>> {
+        let user_phone = normalize_phone(user_phone);
+        let row = sqlx::query(
+            "SELECT id, user_phone, language, front, back, partner_phone, conversation_id,
+                    interval_days, ease_factor, repetitions, due_date
+             FROM vocab_cards
+             WHERE user_phone = ? AND language = ? AND due_date <= date('now')
+             ORDER BY due_date ASC, id ASC
+             LIMIT 1",
+        )
+        .bind(user_phone)
+        .bind(language)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(vocab_card_from_row))
+    }
+
+    pub async fn get_vocab_card(&self, card_id: i64) -> anyhow::Result<Option<VocabCard>> {
+        let row = sqlx::query(
+            "SELECT id, user_phone, language, front, back, partner_phone, conversation_id,
+                    interval_days, ease_factor, repetitions, due_date
+             FROM vocab_cards WHERE id = ?",
+        )
+        .bind(card_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(vocab_card_from_row))
+    }
+
+    pub async fn review_vocab_card_pass(&self, card_id: i64) -> anyhow::Result<()> {
+        let card = self
+            .get_vocab_card(card_id)
+            .await?
+            .context("vocab card not found")?;
+
+        let repetitions = card.repetitions + 1;
+        let ease_factor = (card.ease_factor + 0.1).min(2.5);
+        let interval_days = if repetitions == 1 {
+            1.0
+        } else if repetitions == 2 {
+            6.0
+        } else {
+            card.interval_days * ease_factor
+        };
+
+        sqlx::query(
+            "UPDATE vocab_cards
+             SET repetitions = ?, ease_factor = ?, interval_days = ?,
+                 due_date = date('now', '+' || CAST(? AS TEXT) || ' days')
+             WHERE id = ?",
+        )
+        .bind(repetitions)
+        .bind(ease_factor)
+        .bind(interval_days)
+        .bind(interval_days.round() as i64)
+        .bind(card_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn review_vocab_card_fail(&self, card_id: i64) -> anyhow::Result<()> {
+        let card = self
+            .get_vocab_card(card_id)
+            .await?
+            .context("vocab card not found")?;
+
+        let ease_factor = (card.ease_factor - 0.2).max(1.3);
+
+        sqlx::query(
+            "UPDATE vocab_cards
+             SET repetitions = 0, ease_factor = ?, interval_days = 1,
+                 due_date = date('now', '+1 day')
+             WHERE id = ?",
+        )
+        .bind(ease_factor)
+        .bind(card_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}
+
+fn vocab_card_from_row(row: sqlx::sqlite::SqliteRow) -> VocabCard {
+    VocabCard {
+        id: row.get("id"),
+        user_phone: row.get("user_phone"),
+        language: row.get("language"),
+        front: row.get("front"),
+        back: row.get("back"),
+        partner_phone: row.get("partner_phone"),
+        conversation_id: row.get("conversation_id"),
+        interval_days: row.get("interval_days"),
+        ease_factor: row.get("ease_factor"),
+        repetitions: row.get("repetitions"),
+        due_date: row.get("due_date"),
     }
 }
 

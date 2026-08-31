@@ -30,6 +30,18 @@ pub struct JudgmentResponse {
     pub feedback: String,
 }
 
+#[derive(Deserialize)]
+struct VocabExtractionResponse {
+    #[serde(default)]
+    items: Vec<VocabItem>,
+}
+
+#[derive(Deserialize)]
+struct VocabItem {
+    term: String,
+    translation: String,
+}
+
 impl Llm {
     pub fn from_env(conversation: &Conversation) -> Result<Self> {
         let api_key =
@@ -204,6 +216,64 @@ impl Llm {
         );
 
         self.judge(&system, &user).await
+    }
+
+    pub async fn extract_vocabulary(&self, message: &str) -> Result<Vec<(String, String)>> {
+        let system = format!(
+            "You extract vocabulary for flashcards from a {target} message. \
+             The student is a {source} speaker learning {target}. \
+             Pick useful individual words and short phrases (up to ~5 words) — \
+             common collocations, idioms, or expressions worth memorizing. \
+             Do NOT include the full sentence unless it is a well-known fixed phrase \
+             (e.g. a greeting or proverb). Skip names, filler, and words that are \
+             obvious cognates with no learning value. \
+             Return JSON only: {{\"items\": [{{\"term\": \"...\", \"translation\": \"...\"}}]}}. \
+             Each term must be in {target}; each translation in {source}. \
+             If nothing is worth adding, return {{\"items\": []}}.",
+            target = self.target_language,
+            source = self.source_language,
+        );
+
+        let user = format!("Message in {target}:\n{message}", target = self.target_language);
+
+        let request = CreateChatCompletionRequestArgs::default()
+            .model(&self.model)
+            .messages([
+                ChatCompletionRequestSystemMessageArgs::default()
+                    .content(system)
+                    .build()?
+                    .into(),
+                ChatCompletionRequestUserMessageArgs::default()
+                    .content(user)
+                    .build()?
+                    .into(),
+            ])
+            .response_format(ResponseFormat::JsonObject)
+            .build()?;
+
+        let response = self.client.chat().create(request).await?;
+        let content = response
+            .choices
+            .first()
+            .and_then(|c| c.message.content.clone())
+            .context("empty response from model")?;
+
+        let parsed: VocabExtractionResponse =
+            serde_json::from_str(&content).context("failed to parse vocabulary JSON")?;
+
+        Ok(parsed
+            .items
+            .into_iter()
+            .filter_map(|item| {
+                let term = item.term.trim();
+                let translation = item.translation.trim();
+                if term.is_empty() || translation.is_empty() {
+                    None
+                } else {
+                    Some((term.to_string(), translation.to_string()))
+                }
+            })
+            .collect())
     }
 
     async fn complete(&self, system: &str, user: &str) -> Result<String> {

@@ -591,6 +591,7 @@ pub async fn handle_help(whatsapp: &WhatsApp, phone: &str) -> anyhow::Result<()>
             phone,
             "molvakt commands:\n\n\
              MENU — open the action menu (recommended)\n\
+             Review vocab — flashcards from your chats (also in MENU)\n\
              LIST — show your conversations\n\
              SWITCH <number> — change active conversation\n\
              SET MODE <number> teacher|learner|exchange|exchange-turns — change conversation mode\n\

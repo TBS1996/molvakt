@@ -15,6 +15,7 @@ use crate::llm::Llm;
 use crate::menu::{handle_menu_command, handle_menu_selection, handle_menu_session, is_menu_command};
 use crate::onboarding;
 use crate::phone::{contact_label, partner_label};
+use crate::vocab;
 use crate::whatsapp::WhatsApp;
 
 #[derive(Clone)]
@@ -279,6 +280,15 @@ impl Bot {
             )
             .await?;
 
+        self.spawn_vocab_extraction(
+            &learner.phone,
+            text,
+            &conversation.target_language,
+            &conversation.source_language,
+            &teacher.phone,
+            conversation.id,
+        );
+
         Ok(())
     }
 
@@ -335,6 +345,15 @@ impl Bot {
                         ),
                     )
                     .await?;
+
+                self.spawn_vocab_extraction(
+                    &learner.phone,
+                    &learner_reply,
+                    &conversation.target_language,
+                    &conversation.source_language,
+                    &teacher.phone,
+                    conversation.id,
+                );
             }
         }
 
@@ -405,6 +424,15 @@ impl Bot {
                 ),
             )
             .await?;
+
+        self.spawn_vocab_extraction(
+            &sender.phone,
+            text,
+            learning_language,
+            partner_learning_language,
+            &partner.phone,
+            conversation.id,
+        );
 
         Ok(())
     }
@@ -503,7 +531,36 @@ impl Bot {
             )
             .await?;
 
+        self.spawn_vocab_extraction(
+            &sender.phone,
+            text,
+            learning_language,
+            partner_learning_language,
+            &partner.phone,
+            conversation.id,
+        );
+
         Ok(())
+    }
+
+    fn spawn_vocab_extraction(
+        &self,
+        user_phone: &str,
+        message: &str,
+        learning_language: &str,
+        source_language: &str,
+        partner_phone: &str,
+        conversation_id: i64,
+    ) {
+        vocab::spawn_extract_from_message(
+            self.db.clone(),
+            user_phone.to_string(),
+            message.to_string(),
+            learning_language.to_string(),
+            source_language.to_string(),
+            partner_phone.to_string(),
+            conversation_id,
+        );
     }
 
     async fn send_review_choices(&self, phone: &str) -> anyhow::Result<()> {
