@@ -16,6 +16,13 @@ const EXPLANATIONS_IN_ENGLISH: &str =
      never in the student's native language or the target language. \
      You may still quote words or short phrases in the target language when teaching vocabulary.";
 
+const LANGUAGE_ONLY_JUDGE: &str =
+    "You are NOT a content moderator. Never reject a message for topic, tone, rudeness, \
+     flirtation, politics, personal details, or anything you find inappropriate. \
+     Adults are practicing language with a partner they know — forward anything that is \
+     real human text. Your ONLY job is language: is it written in the expected language, \
+     and is it understandable enough for a casual chat? If yes, accept.";
+
 pub struct Llm {
     client: Client<OpenAIConfig>,
     model: String,
@@ -87,6 +94,7 @@ impl Llm {
     pub async fn validate_teacher_message(&self, message: &str) -> Result<JudgmentResponse> {
         let system = format!(
             "You check whether a native speaker's message is written in {target}. \
+             {language_only} \
              Accept any natural {target} message — including informal, casual, elliptical, \
              or abbreviated phrasing (e.g. implied words, short follow-up questions). \
              Do NOT reject for style, formality, clarity, or how you would phrase it differently. \
@@ -100,6 +108,7 @@ impl Llm {
              {{\"accepted\": true/false, \"feedback\": \"brief explanation if rejected\"}}",
             target = self.target_language,
             source = self.source_language,
+            language_only = LANGUAGE_ONLY_JUDGE,
             english_rule = EXPLANATIONS_IN_ENGLISH,
         );
 
@@ -194,6 +203,7 @@ impl Llm {
     ) -> Result<JudgmentResponse> {
         let system = format!(
             "You are a language tutor helping a student write in {target}. \
+             {language_only} \
              Accept any reply that a native speaker would understand in casual conversation — \
              including informal, elliptical, or abbreviated phrasing (e.g. short follow-ups like \
              'og du?'). Do NOT reject for style, formality, spelling mistakes, missing diacritics \
@@ -209,6 +219,7 @@ impl Llm {
              {{\"accepted\": true/false, \"feedback\": \"hints, mini-lesson, or brief praise\"}}",
             target = self.target_language,
             source = self.source_language,
+            language_only = LANGUAGE_ONLY_JUDGE,
             english_rule = EXPLANATIONS_IN_ENGLISH,
         );
 
