@@ -1974,10 +1974,8 @@ impl Db {
         let ease_factor = (card.ease_factor + 0.1).min(2.5);
         let interval_days = if repetitions == 1 {
             1.0
-        } else if repetitions == 2 {
-            6.0
         } else {
-            card.interval_days * ease_factor
+            card.interval_days * srs_pass_multiplier()
         };
 
         sqlx::query(
@@ -2100,6 +2098,17 @@ impl Db {
         .await?;
         Ok(())
     }
+}
+
+fn srs_pass_multiplier() -> f64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.subsec_nanos())
+        .unwrap_or(0);
+    // Uniform random in [1.5, 2.5].
+    1.5 + (seed % 10_001) as f64 / 10_000.0
 }
 
 fn vocab_card_from_row(row: sqlx::sqlite::SqliteRow) -> VocabCard {
