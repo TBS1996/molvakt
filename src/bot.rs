@@ -255,7 +255,7 @@ impl Bot {
         let llm = Llm::from_env(conversation)?;
         let judgment = llm.validate_teacher_message(text).await?;
         if !judgment.accepted {
-            let feedback = format!("Rejected: {}", judgment.feedback);
+            let feedback = judgment.format_not_sent_teacher(&conversation.target_language);
             self.whatsapp
                 .send_text(&teacher.phone, &feedback)
                 .await?;
@@ -414,7 +414,10 @@ impl Bot {
         let judgment = llm.validate_reply(text, &history).await?;
         if !judgment.accepted {
             self.whatsapp
-                .send_text(&sender.phone, &judgment.feedback)
+                .send_text(
+                    &sender.phone,
+                    &judgment.format_not_sent_reply(learning_language),
+                )
                 .await?;
             return Ok(());
         }
@@ -533,15 +536,12 @@ impl Bot {
         let llm = Llm::for_exchange(active_language, "English")?;
         let judgment = llm.validate_reply(text, &history).await?;
         if !judgment.accepted {
-            let message = if judgment.wrong_language {
-                judgment.feedback
-            } else {
-                format!(
-                    "{}\n\n(Write in {active_language} on your turn.)",
-                    judgment.feedback
+            self.whatsapp
+                .send_text(
+                    &sender.phone,
+                    &judgment.format_not_sent_reply(active_language),
                 )
-            };
-            self.whatsapp.send_text(&sender.phone, &message).await?;
+                .await?;
             return Ok(());
         }
 

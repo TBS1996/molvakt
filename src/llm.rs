@@ -39,6 +39,24 @@ pub struct JudgmentResponse {
     pub wrong_language: bool,
 }
 
+impl JudgmentResponse {
+    pub fn format_not_sent_reply(&self, target_language: &str) -> String {
+        let header = if self.wrong_language {
+            format!("[Not sent — type it in {target_language} to send.]")
+        } else {
+            format!("[Not sent — not good enough yet. Write again in {target_language}.]")
+        };
+        format!("{header}\n\n{}", self.feedback)
+    }
+
+    pub fn format_not_sent_teacher(&self, target_language: &str) -> String {
+        format!(
+            "[Not sent — write in {target_language} to send.]\n\n{}",
+            self.feedback
+        )
+    }
+}
+
 #[derive(Deserialize)]
 struct VocabExtractionResponse {
     #[serde(default)]

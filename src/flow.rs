@@ -234,7 +234,8 @@ pub async fn handle_learner_message(
                     turn.teacher_message = Some(summary);
                     *session = LearnerSession::Idle;
                 } else {
-                    turn.learner_messages.push(judgment.feedback);
+                    turn.learner_messages
+                        .push(judgment.format_not_sent_reply(llm.target_language()));
                 }
                 break;
             }
