@@ -498,6 +498,81 @@ impl Db {
         Ok(content)
     }
 
+    pub async fn viewer_sent_last_message(
+        &self,
+        conversation_id: i64,
+        viewer_phone: &str,
+    ) -> anyhow::Result<bool> {
+        let conversation = self.get_conversation(conversation_id).await?;
+        let viewer_phone = normalize_phone(viewer_phone);
+
+        if conversation.mode.is_exchange() {
+            let last_sender: Option<String> = sqlx::query_scalar(
+                "SELECT sender_phone FROM messages
+                 WHERE conversation_id = ?
+                 ORDER BY id DESC LIMIT 1",
+            )
+            .bind(conversation_id)
+            .fetch_optional(&self.pool)
+            .await?;
+            return Ok(last_sender.as_deref().map(normalize_phone) == Some(viewer_phone));
+        }
+
+        let participant = self
+            .find_participant_in_conversation(&viewer_phone, conversation_id)
+            .await?
+            .context("not a participant in this conversation")?;
+        let last_role: Option<String> = sqlx::query_scalar(
+            "SELECT role FROM messages
+             WHERE conversation_id = ?
+             ORDER BY id DESC LIMIT 1",
+        )
+        .bind(conversation_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(last_role.as_deref() == Some(participant.role.as_str()))
+    }
+
+    pub async fn minutes_since_viewer_sent_message(
+        &self,
+        conversation_id: i64,
+        viewer_phone: &str,
+    ) -> anyhow::Result<Option<i64>> {
+        let conversation = self.get_conversation(conversation_id).await?;
+        let viewer_phone = normalize_phone(viewer_phone);
+
+        let minutes: Option<i64> = if conversation.mode.is_exchange() {
+            sqlx::query_scalar(
+                "SELECT CAST((julianday('now') - julianday(created_at)) * 1440 AS INTEGER)
+                 FROM messages
+                 WHERE conversation_id = ? AND sender_phone = ?
+                 ORDER BY id DESC LIMIT 1",
+            )
+            .bind(conversation_id)
+            .bind(&viewer_phone)
+            .fetch_optional(&self.pool)
+            .await?
+        } else {
+            let participant = self
+                .find_participant_in_conversation(&viewer_phone, conversation_id)
+                .await?
+                .context("not a participant in this conversation")?;
+            sqlx::query_scalar(
+                "SELECT CAST((julianday('now') - julianday(created_at)) * 1440 AS INTEGER)
+                 FROM messages
+                 WHERE conversation_id = ? AND role = ?
+                 ORDER BY id DESC LIMIT 1",
+            )
+            .bind(conversation_id)
+            .bind(participant.role.as_str())
+            .fetch_optional(&self.pool)
+            .await?
+        };
+
+        Ok(minutes)
+    }
+
     pub async fn insert_message(
         &self,
         conversation_id: i64,

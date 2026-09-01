@@ -1,6 +1,7 @@
 use crate::db::{ConversationListing, ConversationMode, ConversationModeSetting, Db, SetModeError};
 use crate::phone::{contact_label, looks_like_phone, normalize_phone, phones_match};
 use crate::whatsapp::WhatsApp;
+use anyhow::Context;
 
 fn format_language_name(language: &str) -> String {
     if looks_like_phone(language) {
@@ -62,6 +63,141 @@ pub fn listing_should_show_partner_last_message(listing: &ConversationListing) -
         }
         _ => false,
     }
+}
+
+pub const PING_PARTNER_PREFIX: &str = "ping_";
+pub const PING_MIN_MINUTES: i64 = 30;
+
+pub fn parse_ping_button(text: &str) -> Option<i64> {
+    text.strip_prefix(PING_PARTNER_PREFIX)
+        .and_then(|id| id.parse().ok())
+}
+
+pub fn ping_button_id(conversation_id: i64) -> String {
+    format!("{PING_PARTNER_PREFIX}{conversation_id}")
+}
+
+pub async fn can_ping_partner(
+    db: &Db,
+    listing: &ConversationListing,
+    viewer_phone: &str,
+) -> anyhow::Result<bool> {
+    if listing.is_pending || listing_is_broken(listing, viewer_phone) {
+        return Ok(false);
+    }
+
+    // You sent last and are still waiting for them to respond.
+    if !db
+        .viewer_sent_last_message(listing.conversation_id, viewer_phone)
+        .await?
+    {
+        return Ok(false);
+    }
+
+    let still_their_turn = matches!(
+        listing.turn,
+        Some(crate::db::ConversationTurnStatus::WaitingForReply)
+            | Some(crate::db::ConversationTurnStatus::WaitingForMessage)
+    );
+    if !still_their_turn {
+        return Ok(false);
+    }
+
+    let Some(minutes) = db
+        .minutes_since_viewer_sent_message(listing.conversation_id, viewer_phone)
+        .await?
+    else {
+        return Ok(false);
+    };
+
+    Ok(minutes >= PING_MIN_MINUTES)
+}
+
+pub async fn send_waiting_for_partner_notice(
+    db: &Db,
+    whatsapp: &WhatsApp,
+    phone: &str,
+    conversation_id: i64,
+    body: &str,
+) -> anyhow::Result<()> {
+    let listings = db.list_conversations_for_phone(phone).await?;
+    let Some(listing) = listings
+        .iter()
+        .find(|listing| listing.conversation_id == conversation_id)
+    else {
+        whatsapp.send_text(phone, body).await?;
+        return Ok(());
+    };
+
+    if can_ping_partner(db, listing, phone).await? {
+        let ping_id = ping_button_id(conversation_id);
+        whatsapp
+            .send_review_choice_list(
+                phone,
+                body,
+                "Options",
+                &[(ping_id.as_str(), "Ping them", "")],
+            )
+            .await?;
+    } else {
+        whatsapp.send_text(phone, body).await?;
+    }
+
+    Ok(())
+}
+
+pub async fn handle_ping(
+    db: &Db,
+    whatsapp: &WhatsApp,
+    phone: &str,
+    conversation_id: i64,
+) -> anyhow::Result<()> {
+    let listings = db.list_conversations_for_phone(phone).await?;
+    let Some(listing) = listings
+        .iter()
+        .find(|listing| listing.conversation_id == conversation_id)
+    else {
+        whatsapp
+            .send_text(phone, "That chat is no longer available.")
+            .await?;
+        return Ok(());
+    };
+
+    if !can_ping_partner(db, listing, phone).await? {
+        whatsapp
+            .send_text(
+                phone,
+                "You can't ping right now — it's your turn, they already replied, or it's been less than 30 minutes since you sent.",
+            )
+            .await?;
+        return Ok(());
+    }
+
+    let partner_phone = listing
+        .partner_phone
+        .as_deref()
+        .context("no partner in conversation")?;
+    let sender_name = db.get_display_name(phone).await?;
+    let sender_label = contact_label(phone, sender_name.as_deref());
+    whatsapp
+        .send_text(
+            partner_phone,
+            &format!("{sender_label} pinged you to reply to their message."),
+        )
+        .await?;
+
+    let partner_name = db.get_display_name(partner_phone).await?;
+    whatsapp
+        .send_text(
+            phone,
+            &format!(
+                "Reminder sent to {}.",
+                contact_label(partner_phone, partner_name.as_deref())
+            ),
+        )
+        .await?;
+
+    Ok(())
 }
 
 pub fn format_listing_status_text(listing: &ConversationListing) -> String {

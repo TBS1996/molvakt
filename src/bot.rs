@@ -1,10 +1,10 @@
 use anyhow::Context;
 
 use crate::conversations::{
-    format_chat_label, handle_cancel, handle_help, handle_list, handle_set_language, handle_set_mode,
-    handle_switch, is_help_command, is_list_command, parse_cancel_selection,
-    parse_set_language, parse_set_mode, parse_start_conversation_command, parse_switch_selection,
-    StartConversationCommand,
+    format_chat_label, handle_cancel, handle_help, handle_list, handle_ping, handle_set_language,
+    handle_set_mode, handle_switch, is_help_command, is_list_command, parse_cancel_selection,
+    parse_ping_button, parse_set_language, parse_set_mode, parse_start_conversation_command,
+    parse_switch_selection, send_waiting_for_partner_notice, StartConversationCommand,
 };
 use crate::db::{
     Conversation, ConversationMode, Db, MessageRole, OnboardingData, OnboardingStep,
@@ -96,6 +96,12 @@ impl Bot {
                 text,
             )
             .await;
+        }
+
+        if is_interactive {
+            if let Some(conversation_id) = parse_ping_button(text) {
+                return handle_ping(&self.db, &self.whatsapp, phone, conversation_id).await;
+            }
         }
 
         if let Some((step, data)) = self.db.load_menu_session(phone).await? {
@@ -243,12 +249,14 @@ impl Bot {
 
         let session = self.db.load_learner_session(learner.id).await?;
         if session != LearnerSession::Idle {
-            self.whatsapp
-                .send_text(
-                    &teacher.phone,
-                    "Please wait — the learner is still working on your last message.",
-                )
-                .await?;
+            send_waiting_for_partner_notice(
+                &self.db,
+                &self.whatsapp,
+                &teacher.phone,
+                conversation.id,
+                "Please wait — the learner is still working on your last message.",
+            )
+            .await?;
             return Ok(());
         }
 
@@ -504,16 +512,18 @@ impl Bot {
 
         if sender.phone != turn_phone {
             let holder_name = self.db.get_display_name(turn_phone).await?;
-            self.whatsapp
-                .send_text(
-                    &sender.phone,
-                    &format!(
-                        "It's {}'s turn — wait for them to write in {}.",
-                        contact_label(turn_phone, holder_name.as_deref()),
-                        conversation.exchange_active_language()
-                    ),
-                )
-                .await?;
+            send_waiting_for_partner_notice(
+                &self.db,
+                &self.whatsapp,
+                &sender.phone,
+                conversation.id,
+                &format!(
+                    "It's {}'s turn — wait for them to write in {}.",
+                    contact_label(turn_phone, holder_name.as_deref()),
+                    conversation.exchange_active_language()
+                ),
+            )
+            .await?;
             return Ok(());
         }
 
