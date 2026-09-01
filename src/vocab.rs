@@ -114,7 +114,7 @@ pub async fn start_review(db: &Db, whatsapp: &WhatsApp, phone: &str) -> anyhow::
         return Ok(());
     }
 
-    show_next_card(db, whatsapp, phone, &language).await
+    show_next_card(db, whatsapp, phone, &language, None).await
 }
 
 pub async fn handle_vocab_button(
@@ -141,11 +141,11 @@ pub async fn handle_vocab_button(
         VOCAB_SHOW => show_card_answer(whatsapp, phone, &card).await,
         VOCAB_GOOD => {
             db.review_vocab_card_pass(card_id).await?;
-            finish_or_next(db, whatsapp, phone, &card.language, true).await
+            finish_or_next(db, whatsapp, phone, &card, true).await
         }
         VOCAB_AGAIN => {
             db.review_vocab_card_fail(card_id).await?;
-            finish_or_next(db, whatsapp, phone, &card.language, false).await
+            finish_or_next(db, whatsapp, phone, &card, false).await
         }
         _ => Ok(()),
     }
@@ -213,8 +213,13 @@ async fn show_next_card(
     whatsapp: &WhatsApp,
     phone: &str,
     language: &str,
+    after: Option<&VocabCard>,
 ) -> anyhow::Result<()> {
-    let Some(card) = db.next_due_vocab_card(phone, language).await? else {
+    let skip_inverse = after.map(|card| (card.front.as_str(), card.back.as_str()));
+    let Some(card) = db
+        .next_due_vocab_card(phone, language, skip_inverse)
+        .await?
+    else {
         whatsapp
             .send_text(phone, "All done for now — no more cards due.")
             .await?;
@@ -278,9 +283,10 @@ async fn finish_or_next(
     db: &Db,
     whatsapp: &WhatsApp,
     phone: &str,
-    language: &str,
+    after: &VocabCard,
     passed: bool,
 ) -> anyhow::Result<()> {
+    let language = &after.language;
     let remaining = db.count_due_vocab_cards(phone, language).await?;
     if remaining == 0 {
         let message = if passed {
@@ -293,5 +299,5 @@ async fn finish_or_next(
         return Ok(());
     }
 
-    show_next_card(db, whatsapp, phone, language).await
+    show_next_card(db, whatsapp, phone, language, Some(after)).await
 }

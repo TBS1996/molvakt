@@ -1933,20 +1933,37 @@ impl Db {
         &self,
         user_phone: &str,
         language: &str,
+        skip_inverse_of: Option<(&str, &str)>,
     ) -> anyhow::Result<Option<VocabCard>> {
         let user_phone = normalize_phone(user_phone);
-        let row = sqlx::query(
-            "SELECT id, user_phone, language, front, back, partner_phone, conversation_id,
+        const SELECT: &str = "SELECT id, user_phone, language, front, back, partner_phone, conversation_id,
                     interval_days, ease_factor, repetitions, due_date
              FROM vocab_cards
-             WHERE user_phone = ? AND language = ? AND due_date <= date('now')
-             ORDER BY due_date ASC, id ASC
-             LIMIT 1",
-        )
-        .bind(user_phone)
-        .bind(language)
-        .fetch_optional(&self.pool)
-        .await?;
+             WHERE user_phone = ? AND language = ? AND due_date <= date('now')";
+
+        if let Some((front, back)) = skip_inverse_of {
+            let row = sqlx::query(&format!(
+                "{SELECT} AND NOT (front = ? AND back = ?)
+                 ORDER BY RANDOM()
+                 LIMIT 1"
+            ))
+            .bind(&user_phone)
+            .bind(language)
+            .bind(back)
+            .bind(front)
+            .fetch_optional(&self.pool)
+            .await?;
+
+            if row.is_some() {
+                return Ok(row.map(vocab_card_from_row));
+            }
+        }
+
+        let row = sqlx::query(&format!("{SELECT} ORDER BY RANDOM() LIMIT 1"))
+            .bind(user_phone)
+            .bind(language)
+            .fetch_optional(&self.pool)
+            .await?;
 
         Ok(row.map(vocab_card_from_row))
     }
