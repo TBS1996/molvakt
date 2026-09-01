@@ -59,7 +59,12 @@ impl Bot {
                 }
             }
             if let Err(error) = self
-                .handle_message(&message.from, &message.text, message.is_interactive)
+                .handle_message(
+                    &message.from,
+                    &message.text,
+                    message.is_interactive,
+                    message.whatsapp_message_id.as_deref(),
+                )
                 .await
             {
                 eprintln!("error handling message from {}: {error:?}", message.from);
@@ -80,6 +85,7 @@ impl Bot {
         phone: &str,
         text: &str,
         is_interactive: bool,
+        incoming_message_id: Option<&str>,
     ) -> anyhow::Result<()> {
         self.db.touch_user_activity(phone).await?;
 
@@ -221,22 +227,42 @@ impl Bot {
                 let conversation = self.db.get_conversation(participant.conversation_id).await?;
                 if conversation.mode == ConversationMode::Exchange {
                     return self
-                        .handle_parallel_exchange_message(&participant, text, &conversation)
+                        .handle_parallel_exchange_message(
+                            &participant,
+                            text,
+                            &conversation,
+                            incoming_message_id,
+                        )
                         .await;
                 }
                 if conversation.mode == ConversationMode::ExchangeTurns {
                     return self
-                        .handle_exchange_turns_message(&participant, text, &conversation)
+                        .handle_exchange_turns_message(
+                            &participant,
+                            text,
+                            &conversation,
+                            incoming_message_id,
+                        )
                         .await;
                 }
                 match participant.role {
                     ParticipantRole::Teacher => {
-                        self.handle_teacher_message(&participant, text, &conversation)
-                            .await
+                        self.handle_teacher_message(
+                            &participant,
+                            text,
+                            &conversation,
+                            incoming_message_id,
+                        )
+                        .await
                     }
                     ParticipantRole::Learner => {
-                        self.handle_learner_message(&participant, text, &conversation)
-                            .await
+                        self.handle_learner_message(
+                            &participant,
+                            text,
+                            &conversation,
+                            incoming_message_id,
+                        )
+                        .await
                     }
                 }
             }
@@ -248,6 +274,7 @@ impl Bot {
         teacher: &Participant,
         text: &str,
         conversation: &Conversation,
+        incoming_message_id: Option<&str>,
     ) -> anyhow::Result<()> {
         let learner = self
             .db
@@ -316,15 +343,7 @@ impl Bot {
             .await?;
         self.send_review_choices(&learner.phone).await?;
 
-        let learner_name = self.db.get_display_name(&learner.phone).await?;
-        self.whatsapp
-            .send_text(
-                &teacher.phone,
-                &format!(
-                    "Message sent to {} (learner).",
-                    contact_label(&learner.phone, learner_name.as_deref())
-                ),
-            )
+        self.react_message_sent(&teacher.phone, incoming_message_id)
             .await?;
 
         self.spawn_vocab_extraction(
@@ -343,6 +362,7 @@ impl Bot {
         learner: &Participant,
         text: &str,
         conversation: &Conversation,
+        incoming_message_id: Option<&str>,
     ) -> anyhow::Result<()> {
         let llm = Llm::from_env(conversation)?;
         let history = self.db.load_history(conversation.id).await?;
@@ -381,15 +401,7 @@ impl Bot {
                     self.whatsapp.send_text(&teacher.phone, &summary).await?;
                 }
 
-                let teacher_name = self.db.get_display_name(&teacher.phone).await?;
-                self.whatsapp
-                    .send_text(
-                        &learner.phone,
-                        &format!(
-                            "Message sent to {} (teacher).",
-                            contact_label(&teacher.phone, teacher_name.as_deref())
-                        ),
-                    )
+                self.react_message_sent(&learner.phone, incoming_message_id)
                     .await?;
 
                 self.spawn_vocab_extraction(
@@ -410,6 +422,7 @@ impl Bot {
         sender: &Participant,
         text: &str,
         conversation: &Conversation,
+        incoming_message_id: Option<&str>,
     ) -> anyhow::Result<()> {
         let partner = self
             .db
@@ -462,15 +475,7 @@ impl Bot {
 
         self.whatsapp.send_text(&partner.phone, &outgoing).await?;
 
-        let partner_name = self.db.get_display_name(&partner.phone).await?;
-        self.whatsapp
-            .send_text(
-                &sender.phone,
-                &format!(
-                    "Message sent to {}.",
-                    contact_label(&partner.phone, partner_name.as_deref())
-                ),
-            )
+        self.react_message_sent(&sender.phone, incoming_message_id)
             .await?;
 
         self.spawn_vocab_extraction(
@@ -489,6 +494,7 @@ impl Bot {
         sender: &Participant,
         text: &str,
         conversation: &Conversation,
+        incoming_message_id: Option<&str>,
     ) -> anyhow::Result<()> {
         self.db
             .ensure_exchange_round_initialized(conversation, &sender.phone)
@@ -546,6 +552,7 @@ impl Bot {
                     &conversation,
                     &mut session,
                     active_language,
+                    incoming_message_id,
                 )
                 .await;
         }
@@ -563,8 +570,15 @@ impl Bot {
             return Ok(());
         }
 
-        self.finish_exchange_turns_message(sender, &partner, &conversation, text, active_language)
-            .await
+        self.finish_exchange_turns_message(
+            sender,
+            &partner,
+            &conversation,
+            text,
+            active_language,
+            incoming_message_id,
+        )
+        .await
     }
 
     async fn handle_exchange_turns_in_review(
@@ -575,6 +589,7 @@ impl Bot {
         conversation: &Conversation,
         session: &mut LearnerSession,
         active_language: &str,
+        incoming_message_id: Option<&str>,
     ) -> anyhow::Result<()> {
         let history = self.db.load_history(conversation.id).await?;
         let llm = Llm::for_exchange(active_language, "English")?;
@@ -599,8 +614,15 @@ impl Bot {
         }
 
         if let Some(reply) = turn.completed_reply {
-            self.finish_exchange_turns_message(sender, partner, conversation, &reply, active_language)
-                .await?;
+            self.finish_exchange_turns_message(
+                sender,
+                partner,
+                conversation,
+                &reply,
+                active_language,
+                incoming_message_id,
+            )
+            .await?;
         }
 
         Ok(())
@@ -613,6 +635,7 @@ impl Bot {
         conversation: &Conversation,
         text: &str,
         active_language: &str,
+        incoming_message_id: Option<&str>,
     ) -> anyhow::Result<()> {
         self.db
             .insert_exchange_message(conversation.id, sender, text)
@@ -632,13 +655,6 @@ impl Bot {
 
         let sender_name = self.db.get_display_name(&sender.phone).await?;
         let sender_label = contact_label(&sender.phone, sender_name.as_deref());
-        let partner_label = contact_label(
-            &partner.phone,
-            self.db
-                .get_display_name(&partner.phone)
-                .await?
-                .as_deref(),
-        );
         let mut outgoing = format!("[{sender_label}]: {text}");
 
         if advance.flipped_language {
@@ -684,11 +700,7 @@ impl Bot {
             self.send_review_choices(&partner.phone).await?;
         }
 
-        self.whatsapp
-            .send_text(
-                &sender.phone,
-                &format!("Message sent to {partner_label}."),
-            )
+        self.react_message_sent(&sender.phone, incoming_message_id)
             .await?;
 
         self.spawn_vocab_extraction(
@@ -699,6 +711,16 @@ impl Bot {
             conversation.id,
         );
 
+        Ok(())
+    }
+
+    async fn react_message_sent(&self, phone: &str, message_id: Option<&str>) -> anyhow::Result<()> {
+        let Some(message_id) = message_id else {
+            return Ok(());
+        };
+        if let Err(error) = self.whatsapp.react(phone, message_id, "✅").await {
+            eprintln!("failed to react to message {message_id} for {phone}: {error:?}");
+        }
         Ok(())
     }
 

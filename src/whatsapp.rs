@@ -17,6 +17,7 @@ pub struct ParsedIncomingMessage {
     /// True when the user tapped a list row or reply button (not typed text).
     pub is_interactive: bool,
     pub profile_name: Option<String>,
+    pub whatsapp_message_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,6 +54,7 @@ pub struct WebhookProfile {
 
 #[derive(Debug, Deserialize)]
 pub struct IncomingMessage {
+    pub id: Option<String>,
     pub from: String,
     #[serde(rename = "type")]
     pub message_type: String,
@@ -117,6 +119,7 @@ impl WhatsApp {
                             text,
                             is_interactive,
                             profile_name,
+                            whatsapp_message_id: message.id.clone(),
                         });
                     }
                 }
@@ -214,6 +217,21 @@ impl WhatsApp {
             serde_json::json!({
                 "type": "text",
                 "text": { "body": body },
+            }),
+        )
+        .await
+    }
+
+    pub async fn react(&self, to: &str, message_id: &str, emoji: &str) -> anyhow::Result<()> {
+        let to = normalize_phone(to);
+        self.send_interactive(
+            &to,
+            serde_json::json!({
+                "type": "reaction",
+                "reaction": {
+                    "message_id": message_id,
+                    "emoji": emoji,
+                }
             }),
         )
         .await
