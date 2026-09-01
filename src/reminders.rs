@@ -10,6 +10,11 @@ use crate::whatsapp::WhatsApp;
 
 const DEFAULT_TIMEZONE: &str = "Europe/Oslo";
 const MORNING_HOUR: u32 = 8;
+pub const DISABLE_DAILY_REMINDERS_BUTTON: &str = "reminders_off";
+
+pub fn is_disable_daily_reminders_button(text: &str) -> bool {
+    text == DISABLE_DAILY_REMINDERS_BUTTON
+}
 
 pub async fn run_tick(db: &Db, whatsapp: &WhatsApp) -> anyhow::Result<()> {
     let phones = db.list_registered_user_phones().await?;
@@ -27,6 +32,10 @@ async fn maybe_send_morning_reminder(
     phone: &str,
 ) -> anyhow::Result<()> {
     let settings = db.get_user_reminder_settings(phone).await?;
+    if !settings.morning_reminders_enabled {
+        return Ok(());
+    }
+
     let timezone = settings
         .timezone
         .as_deref()
@@ -60,7 +69,18 @@ async fn maybe_send_morning_reminder(
     }
 
     let body = format_reminder_message(&pending);
-    whatsapp.send_text(phone, &body).await?;
+    whatsapp
+        .send_review_choice_list(
+            phone,
+            &body,
+            "Options",
+            &[(
+                DISABLE_DAILY_REMINDERS_BUTTON,
+                "Turn off reminders",
+                "",
+            )],
+        )
+        .await?;
     db.mark_morning_reminder_sent(phone, &local_date).await?;
     Ok(())
 }
@@ -113,6 +133,18 @@ pub async fn handle_set_timezone(db: &Db, whatsapp: &WhatsApp, phone: &str, time
     db.set_user_timezone(phone, timezone).await?;
     whatsapp
         .send_text(phone, &format!("Timezone set to {timezone}. Morning reminders arrive around 8:00 local time."))
+        .await?;
+    Ok(())
+}
+
+pub async fn handle_disable_daily_reminders(
+    db: &Db,
+    whatsapp: &WhatsApp,
+    phone: &str,
+) -> anyhow::Result<()> {
+    db.set_morning_reminders_enabled(phone, false).await?;
+    whatsapp
+        .send_text(phone, "Daily reminders turned off.")
         .await?;
     Ok(())
 }

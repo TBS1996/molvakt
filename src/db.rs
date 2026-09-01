@@ -264,6 +264,7 @@ pub struct UserReminderSettings {
     pub timezone: Option<String>,
     pub last_message_at: Option<String>,
     pub last_morning_reminder_date: Option<String>,
+    pub morning_reminders_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2135,7 +2136,8 @@ impl Db {
     ) -> anyhow::Result<UserReminderSettings> {
         let phone = normalize_phone(phone);
         let row = sqlx::query(
-            "SELECT timezone, last_message_at, last_morning_reminder_date
+            "SELECT timezone, last_message_at, last_morning_reminder_date,
+                    morning_reminders_enabled
              FROM user_settings WHERE phone = ?",
         )
         .bind(&phone)
@@ -2147,11 +2149,13 @@ impl Db {
                 timezone: row.get("timezone"),
                 last_message_at: row.get("last_message_at"),
                 last_morning_reminder_date: row.get("last_morning_reminder_date"),
+                morning_reminders_enabled: row.get::<i64, _>("morning_reminders_enabled") != 0,
             })
             .unwrap_or(UserReminderSettings {
                 timezone: None,
                 last_message_at: None,
                 last_morning_reminder_date: None,
+                morning_reminders_enabled: true,
             }))
     }
 
@@ -2186,6 +2190,26 @@ impl Db {
         )
         .bind(&phone)
         .bind(timezone)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_morning_reminders_enabled(
+        &self,
+        phone: &str,
+        enabled: bool,
+    ) -> anyhow::Result<()> {
+        let phone = normalize_phone(phone);
+        sqlx::query(
+            "INSERT INTO user_settings (phone, morning_reminders_enabled, updated_at)
+             VALUES (?, ?, datetime('now'))
+             ON CONFLICT(phone) DO UPDATE SET
+               morning_reminders_enabled = excluded.morning_reminders_enabled,
+               updated_at = excluded.updated_at",
+        )
+        .bind(&phone)
+        .bind(if enabled { 1 } else { 0 })
         .execute(&self.pool)
         .await?;
         Ok(())

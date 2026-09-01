@@ -99,6 +99,14 @@ impl Bot {
         }
 
         if is_interactive {
+            if crate::reminders::is_disable_daily_reminders_button(text) {
+                return crate::reminders::handle_disable_daily_reminders(
+                    &self.db,
+                    &self.whatsapp,
+                    phone,
+                )
+                .await;
+            }
             if let Some(conversation_id) = parse_ping_button(text) {
                 return handle_ping(&self.db, &self.whatsapp, phone, conversation_id).await;
             }
